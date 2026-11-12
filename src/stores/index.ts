@@ -7,6 +7,34 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 export type { AIProvider, AIModel } from '../types';
 
 // ============================================================================
+// UI Store
+// ============================================================================
+
+export const useUIStore = create(
+  persist(
+    (set, get) => ({
+      sidebar: {
+        isOpen: true,
+        isCollapsed: false,
+        activeSection: 'conversations' as 'conversations' | 'projects' | 'agents' | 'tasks',
+      },
+      toggleSidebar: () =>
+        set({ sidebar: { isOpen: !get().sidebar.isOpen } }),
+      collapseSidebar: () => set({ sidebar: { isCollapsed: true } }),
+      expandSidebar: () => set({ sidebar: { isCollapsed: false } }),
+      setSidebarSection: (section: 'conversations' | 'projects' | 'agents' | 'tasks') =>
+        set({ sidebar: { activeSection: section } }),
+      toggleActivityPanel: () =>
+        set({ sidebar: { isOpen: !get().sidebar.isOpen } }),
+      setActivityTab: (tab: string) => set({ activeTab: tab }),
+      addToast: (toast: any) =>
+        set({ toasts: [...(get().toasts || []), toast] }),
+    }),
+    { name: 'friday_ui', storage: createJSONStorage(() => localStorage) }
+  )
+);
+
+// ============================================================================
 // Conversations Store
 // ============================================================================
 
