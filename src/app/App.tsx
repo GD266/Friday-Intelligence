@@ -7,6 +7,7 @@ import { TransmissionLog } from '@/components/core/TransmissionLog';
 import { ToastViewport } from '@/components/core/ToastViewport';
 import { SettingsView } from '@/components/settings/SettingsView';
 import { AutomationView } from '@/components/automation/AutomationView';
+import { ForgeView } from '@/components/developer/ForgeView';
 import { useAssistantStore, useConversationsStore, useSystemStore, useUIStore } from '@/stores';
 import { useTelemetry } from '@/hooks/useTelemetry';
 import { useFridayVoice } from '@/hooks/useFridayVoice';
@@ -17,11 +18,22 @@ import {
 } from '@/lib/friday';
 import { findAutomationAction, requiresAutomationConfirmation } from '@/lib/automation';
 import { runAutomationNow } from '@/lib/automation-runner';
-import type { AutomationAction, AutomationResult, SystemSnapshot } from '@/types';
+import { chatWithFriday, findEngineModel } from '@/lib/ai';
+import {
+  isDeveloperRequest,
+  runDeveloperForge,
+} from '@/lib/developer';
+import { getErrorMessage } from '@/lib/runtime';
+import type {
+  AutomationAction,
+  AutomationResult,
+  MessageMetadata,
+  SystemSnapshot,
+} from '@/types';
 
-const messageMetadata = {
+const localMetadata: MessageMetadata = {
   modelId: 'friday-core-demo',
-  providerId: 'custom' as const,
+  providerId: 'custom',
 };
 
 export default function App() {
@@ -58,18 +70,18 @@ export default function App() {
     conversations.find((conversation) => conversation.id === activeConversationId) ?? null;
 
   const appendAssistantMessage = useCallback(
-    async (text: string) => {
+    async (text: string, metadata?: MessageMetadata) => {
       let conversationId = useConversationsStore.getState().activeConversationId;
       if (!conversationId) {
         const conversation = createConversation({ title: 'FRIDAY session' });
         conversationId = conversation.id;
       }
 
-      addMessage(conversationId, text, 'assistant', messageMetadata);
+      addMessage(conversationId, text, 'assistant', metadata ?? localMetadata);
       useAssistantStore.getState().setLastReply(text);
 
-      const settings = useAssistantStore.getState().settings;
-      if (settings.autoSpeak && settings.voiceEnabled) {
+      const currentSettings = useAssistantStore.getState().settings;
+      if (currentSettings.autoSpeak && currentSettings.voiceEnabled) {
         await speak(text);
       } else {
         const assistant = useAssistantStore.getState();
@@ -77,7 +89,8 @@ export default function App() {
         assistant.setStatusText('Online');
       }
     },
-    [addMessage, createConversation, speak]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [addMessage, createConversation]
   );
 
   const handleUserInput = useCallback(
@@ -110,71 +123,140 @@ export default function App() {
           existing.title === 'FRIDAY session';
       }
 
-      addMessage(conversationId, trimmed, 'user', messageMetadata);
+      addMessage(conversationId, trimmed, 'user', localMetadata);
 
       // A conversation created by an assistant reply or a new session still has a
       // placeholder title. The first user message gives it a meaningful name.
       if (shouldRename) renameConversation(conversationId, conversationTitle);
 
-      try {
-        // A short deliberate beat sells the processing state without blocking the UI.
-        await new Promise((resolve) => window.setTimeout(resolve, 260));
+      const settings = useAssistantStore.getState().settings;
+      const requestedBy = source === 'voice' ? 'voice' : 'text';
 
-        const settings = useAssistantStore.getState().settings;
-        const status = useSystemStore.getState().status;
-        const snapshot: SystemSnapshot | null =
-          status.hostname || status.cpuName
-            ? {
-                cpuUsage: status.cpuUsage,
-                memoryUsage: status.memoryUsage,
-                memoryTotal: status.memoryTotal,
-                uptime: status.uptime,
-                hostname: status.hostname ?? 'this workstation',
-                os: status.os ?? 'Windows',
-                cpuName: status.cpuName ?? '',
-              }
-            : null;
+      // Project forge takes priority for build directives.
+      if (isDeveloperRequest(trimmed)) {
+        try {
+          const status = useSystemStore.getState().status;
+          const snapshot: SystemSnapshot | null =
+            status.hostname || status.cpuName
+              ? {
+                  cpuUsage: status.cpuUsage,
+                  memoryUsage: status.memoryUsage,
+                  memoryTotal: status.memoryTotal,
+                  uptime: status.uptime,
+                  hostname: status.hostname ?? 'this workstation',
+                  os: status.os ?? 'Windows',
+                  cpuName: status.cpuName ?? '',
+                }
+              : null;
 
-        const reply = respondToFriday(trimmed, settings, snapshot);
-        const requestedBy = source === 'voice' ? 'voice' : 'text';
+          const outcome = await runDeveloperForge({ prompt: trimmed, settings, snapshot });
+          useAssistantStore.getState().addDeveloperProject(outcome.project);
 
-        if (reply.actionId) {
-          const target = findAutomationAction(reply.actionId);
+          // Append a confirmation message.
+          const model = findEngineModel(settings.engineModel);
+          const metadata: MessageMetadata = {
+            modelId: settings.engineModel,
+            providerId: model?.provider ?? 'opencode',
+          };
+          await appendAssistantMessage(
+            `${outcome.project.title} is ready. Open it at ${outcome.project.path}.`,
+            metadata
+          );
+          return;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'The project build encountered an error.';
+          const conversationStillExists = useConversationsStore
+            .getState()
+            .conversations.some((conversation) => conversation.id === conversationId);
 
-          if (target) {
-            if (requiresAutomationConfirmation(target, settings)) {
-              useAssistantStore.getState().requestAutomation({
-                action: target,
-                argument: reply.argument,
-                requestedBy,
-              });
-              await appendAssistantMessage(reply.text);
-              return;
-            }
+          if (conversationStillExists) {
+            addMessage(conversationId, message, 'system');
+          }
 
-            const result = await runAutomationNow(target, reply.argument);
-            await appendAssistantMessage(automationResultReply(target, result, settings));
+          const current = useAssistantStore.getState();
+          current.setMood('idle');
+          current.setStatusText('Online');
+          current.setLastReply(message);
+          return;
+        }
+      }
+
+      // Desktop automation.
+      const reply = respondToFriday(trimmed, settings, null);
+      if (reply.actionId) {
+        const target = findAutomationAction(reply.actionId);
+
+        if (target) {
+          if (requiresAutomationConfirmation(target, settings)) {
+            useAssistantStore.getState().requestAutomation({
+              action: target,
+              argument: reply.argument,
+              requestedBy,
+            });
+            await appendAssistantMessage(reply.text);
             return;
           }
+
+          const result = await runAutomationNow(target, reply.argument);
+          await appendAssistantMessage(automationResultReply(target, result, settings));
+          return;
         }
-
-        await appendAssistantMessage(reply.text);
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : 'An unexpected local core error occurred.';
-        const conversationStillExists = useConversationsStore
-          .getState()
-          .conversations.some((conversation) => conversation.id === conversationId);
-
-        if (conversationStillExists) {
-          addMessage(conversationId, message, 'system');
-        }
-
-        const current = useAssistantStore.getState();
-        current.setMood('idle');
-        current.setStatusText('Online');
-        current.setLastReply(message);
       }
+
+      if (!settings.demoMode) {
+        try {
+          const status = useSystemStore.getState().status;
+          const snapshot: SystemSnapshot | null =
+            status.hostname || status.cpuName
+              ? {
+                  cpuUsage: status.cpuUsage,
+                  memoryUsage: status.memoryUsage,
+                  memoryTotal: status.memoryTotal,
+                  uptime: status.uptime,
+                  hostname: status.hostname ?? 'this workstation',
+                  os: status.os ?? 'Windows',
+                  cpuName: status.cpuName ?? '',
+                }
+              : null;
+
+          const response = await chatWithFriday({
+            settings,
+            messages: [{ role: 'user', content: trimmed }],
+            snapshot,
+            temperature: settings.engineTemperature,
+            maxTokens: settings.engineMaxTokens,
+          });
+
+          const model = findEngineModel(settings.engineModel);
+          const metadata: MessageMetadata = {
+            modelId: settings.engineModel,
+            providerId: model?.provider ?? 'opencode',
+            latencyMs: response.latencyMs,
+          };
+          await appendAssistantMessage(response.text, metadata);
+          useAssistantStore.getState().setEngineStatus({
+            state: 'online',
+            source: response.provider,
+            model: response.model,
+            latencyMs: response.latencyMs,
+          });
+          return;
+        } catch (error) {
+          const message = getErrorMessage(error);
+          const fallback = respondToFriday(trimmed, { ...settings, demoMode: true }, null);
+          await appendAssistantMessage(fallback.text, { finishReason: 'error', error: message });
+          useAssistantStore.getState().setEngineStatus({
+            state: 'fallback',
+            source: 'local',
+            model: 'Local demo core',
+            detail: message,
+          });
+          return;
+        }
+      }
+
+      await appendAssistantMessage(reply.text);
     },
     [addMessage, appendAssistantMessage, createConversation, renameConversation]
   );
@@ -251,6 +333,18 @@ export default function App() {
           width="wide"
         >
           <AutomationView />
+        </Overlay>
+      )}
+
+      {overlay === 'forge' && (
+        <Overlay
+          eyebrow="Project forge / sandboxed build"
+          title="Project Forge"
+          description="Type a brief and FRIDAY composes a working project in Documents\\FRIDAY Forge."
+          onClose={closeOverlay}
+          width="wide"
+        >
+          <ForgeView />
         </Overlay>
       )}
 

@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Flappy // Neon Drift</title>
+<style>
+  :root {
+    --ink: #eafcff;
+    --muted: #7f9bb0;
+    --cyan: #4de3ff;
+    --violet: #9b7bff;
+    --pink: #ff5ea8;
+    --panel: rgba(5, 12, 22, 0.72);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px 14px;
+    background:
+      radial-gradient(circle at 18% 12%, rgba(77, 227, 255, 0.14), transparent 34rem),
+      radial-gradient(circle at 82% 88%, rgba(155, 123, 255, 0.16), transparent 30rem),
+      #03060c;
+    color: var(--ink);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overflow-x: hidden;
+  }
+  .shell { width: min(100%, 440px); }
+  .topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 4px 10px;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; color: var(--cyan); }
+  .brand i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 14px var(--cyan);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  .sound {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 7px 12px;
+    font: inherit;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    transition: 160ms ease;
+  }
+  .sound:hover, .sound:focus-visible { color: var(--cyan); border-color: rgba(77, 227, 255, 0.35); outline: none; }
+  .frame {
+    position: relative;
+    border-radius: 22px;
+    padding: 1px;
+    background: linear-gradient(145deg, rgba(77, 227, 255, 0.5), rgba(155, 123, 255, 0.12) 40%, rgba(255, 94, 168, 0.35));
+    box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 70px rgba(77, 227, 255, 0.08);
+  }
+  .frame::after {
+    content: '';
+    position: absolute;
+    inset: -18px;
+    border-radius: 34px;
+    background: radial-gradient(closest-side, rgba(77, 227, 255, 0.12), transparent);
+    z-index: -1;
+    pointer-events: none;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 21px;
+    background: #071322;
+    touch-action: none;
+    cursor: pointer;
+  }
+  .hint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 11px 6px 0;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #607d92;
+  }
+  .hint strong { color: #a9c7d8; font-weight: 500; }
+  @keyframes pulse { 0%, 100% { opacity: 0.5; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) {
+    .brand i { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topline">
+      <span class="brand"><i></i> flappy // neon drift</span>
+      <button class="sound" id="sound" type="button" aria-label="Toggle sound">sound on</button>
+    </div>
+    <div class="frame">
+      <canvas id="game" width="420" height="680" aria-label="Flappy Bird game. Tap, click, or press space to fly."></canvas>
+    </div>
+    <div class="hint">
+      <span><strong>tap</strong> or <strong>space</strong> to fly</span>
+      <span>best <strong id="hintBest">0</strong></span>
+    </div>
+  </main>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const soundButton = document.getElementById('sound');
+  const hintBest = document.getElementById('hintBest');
+  const W = 420;
+  const H = 680;
+  const GROUND = H - 76;
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  ctx.scale(DPR, DPR);
+
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const random = (min, max) => min + Math.random() * (max - min);
+  const COLORS = ['#4de3ff', '#9b7bff', '#ff5ea8', '#ffe27a'];
+
+  let best = 0;
+  try { best = Number(localStorage.getItem('friday-flappy-best')) || 0; } catch (_) { best = 0; }
+  hintBest.textContent = String(best);
+
+  let muted = false;
+  let audio = null;
+  function beep(frequency, duration, type, volume) {
+    if (muted) return;
+    try {
+      if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+      if (audio.state === 'suspended') audio.resume();
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(frequency, audio.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(40, frequency * 0.72), audio.currentTime + duration);
+      gain.gain.setValueAtTime(volume || 0.025, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + duration);
+      osc.connect(gain).connect(audio.destination);
+      osc.start();
+      osc.stop(audio.currentTime + duration);
+    } catch (_) { /* audio is optional */ }
+  }
+
+  soundButton.addEventListener('click', () => {
+    muted = !muted;
+    soundButton.textContent = muted ? 'sound off' : 'sound on';
+  });
+
+  const state = {
+    mode: 'ready',
+    score: 0,
+    elapsed: 0,
+    spawn: 1.15,
+    shake: 0,
+    flash: 0,
+    deadTimer: 0,
+    bird: { x: 118, y: H * 0.42, vy: 0, r: 15, rot: 0, wing: 0 },
+    pipes: [],
+    particles: [],
+    clouds: [],
+    stars: [],
+    buildings: []
+  };
+
+  for (let i = 0; i < 38; i += 1) {
+    state.stars.push({ x: Math.random() * W, y: Math.random() * GROUND * 0.72, r: random(0.4, 1.5), a: random(0.15, 0.8), s: random(0.1, 0.5) });
+  }
+  for (let i = 0; i < 7; i += 1) {
+    state.clouds.push({ x: Math.random() * W, y: random(40, GROUND * 0.62), s: random(0.55, 1.25), speed: random(5, 14), a: random(0.04, 0.1) });
+  }
+  for (let i = 0; i < 26; i += 1) {
+    state.buildings.push({ x: i * 17 + random(-4, 4), w: random(12, 28), h: random(20, 84), a: random(0.08, 0.2) });
+  }
+
+  function reset() {
+    state.mode = 'ready';
+    state.score = 0;
+    state.elapsed = 0;
+    state.spawn = 1.1;
+    state.shake = 0;
+    state.flash = 0;
+    state.deadTimer = 0;
+    state.bird.x = 118;
+    state.bird.y = H * 0.42;
+    state.bird.vy = 0;
+    state.bird.rot = 0;
+    state.pipes = [];
+    state.particles = [];
+  }
+
+  function addPipe() {
+    const gap = clamp(178 - state.score * 2.2, 150, 178);
+    const margin = 74;
+    const top = random(margin, GROUND - gap - margin);
+    state.pipes.push({ x: W + 30, top, gap, scored: false, hue: state.pipes.length % 2 === 0 ? 188 : 262 });
+  }
+
+  function burst(x, y, color, count) {
+    for (let i = 0; i < (count || 10); i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = random(25, 150);
+      state.particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 20,
+        life: random(0.3, 0.7),
+        max: 0.7,
+        size: random(1.5, 4),
+        color
+      });
+    }
+  }
+
+  function flap() {
+    if (state.mode === 'ready') {
+      state.mode = 'playing';
+      state.bird.vy = -430;
+      burst(state.bird.x - 8, state.bird.y + 12, '#4de3ff', 8);
+      beep(520, 0.08, 'triangle', 0.02);
+      return;
+    }
+    if (state.mode === 'playing') {
+      state.bird.vy = -430;
+      state.bird.wing = 0;
+      burst(state.bird.x - 8, state.bird.y + 12, '#4de3ff', 5);
+      beep(560, 0.06, 'triangle', 0.018);
+      return;
+    }
+    if (state.mode === 'dead' && state.deadTimer > 0.55) reset();
+  }
+
+  function die() {
+    if (state.mode !== 'playing') return;
+    state.mode = 'dead';
+    state.deadTimer = 0;
+    state.shake = 1;
+    state.flash = 0.5;
+    burst(state.bird.x, state.bird.y, '#ff5ea8', 26);
+    burst(state.bird.x, state.bird.y, '#ffe27a', 14);
+    beep(150, 0.3, 'sawtooth', 0.05);
+  }
+
+  function update(dt) {
+    state.elapsed += dt;
+    state.shake = Math.max(0, state.shake - dt * 2.6);
+    state.flash = Math.max(0, state.flash - dt * 2.2);
+
+    if (state.mode === 'dead') state.deadTimer += dt;
+
+    for (const cloud of state.clouds) {
+      cloud.x -= cloud.speed * dt;
+      if (cloud.x < -90) {
+        cloud.x = W + 70;
+        cloud.y = random(40, GROUND * 0.62);
+      }
+    }
+
+    for (const particle of state.particles) {
+      particle.life -= dt;
+      particle.vy += 220 * dt;
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+    }
+    state.particles = state.particles.filter((particle) => particle.life > 0);
+
+    if (state.mode === 'ready') {
+      state.bird.y = H * 0.42 + Math.sin(state.elapsed * 3) * 9;
+      state.bird.rot = Math.sin(state.elapsed * 3) * 0.08;
+      return;
+    }
+
+    if (state.mode === 'dead') {
+      state.bird.vy += 1500 * dt;
+      state.bird.y += state.bird.vy * dt;
+      state.bird.rot = clamp(state.bird.rot + dt * 4, 0, 1.5);
+      if (state.bird.y > GROUND - state.bird.r) {
+        state.bird.y = GROUND - state.bird.r;
+        state.bird.vy = 0;
+      }
+      return;
+    }
+
+    state.bird.vy += 1450 * dt;
+    state.bird.y += state.bird.vy * dt;
+    state.bird.rot = clamp(state.bird.vy / 620, -0.55, 1.25);
+    state.bird.wing += dt * 14;
+
+    if (Math.random() < dt * 18) {
+      state.particles.push({
+        x: state.bird.x - 12, y: state.bird.y + random(-5, 8),
+        vx: random(-70, -25), vy: random(-12, 12),
+        life: random(0.2, 0.45), max: 0.45,
+        size: random(1, 2.6), color: '#4de3ff'
+      });
+    }
+
+    state.spawn -= dt;
+    if (state.spawn <= 0) {
+      addPipe();
+      state.spawn = random(1.22, 1.58);
+    }
+
+    const speed = 158 + Math.min(55, state.score * 1.8);
+    for (const pipe of state.pipes) {
+      pipe.x -= speed * dt;
+      if (!pipe.scored && pipe.x + 74 < state.bird.x) {
+        pipe.scored = true;
+        state.score += 1;
+        state.flash = 0.18;
+        beep(880 + Math.min(320, state.score * 12), 0.07, 'square', 0.018);
+      }
+    }
+    state.pipes = state.pipes.filter((pipe) => pipe.x > -100);
+
+    const bird = state.bird;
+    if (bird.y - bird.r < 0) {
+      bird.y = bird.r;
+      bird.vy = 0;
+    }
+    if (bird.y + bird.r >= GROUND) {
+      bird.y = GROUND - bird.r;
+      die();
+      return;
+    }
+
+    for (const pipe of state.pipes) {
+      const withinX = bird.x + bird.r * 0.82 > pipe.x && bird.x - bird.r * 0.82 < pipe.x + 74;
+      const withinGap = bird.y - bird.r * 0.82 > pipe.top && bird.y + bird.r * 0.82 < pipe.top + pipe.gap;
+      if (withinX && !withinGap) {
+        die();
+        return;
+      }
+    }
+  }
+
+  function drawBackground() {
+    const sky = ctx.createLinearGradient(0, 0, 0, GROUND);
+    sky.addColorStop(0, '#061324');
+    sky.addColorStop(0.5, '#0a2038');
+    sky.addColorStop(1, '#123b55');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    const glow = ctx.createRadialGradient(W * 0.76, GROUND * 0.34, 6, W * 0.76, GROUND * 0.34, 150);
+    glow.addColorStop(0, 'rgba(77, 227, 255, 0.18)');
+    glow.addColorStop(0.4, 'rgba(155, 123, 255, 0.08)');
+    glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, GROUND);
+
+    for (const star of state.stars) {
+      ctx.globalAlpha = star.a * (0.65 + Math.sin(state.elapsed * star.s * 4 + star.x) * 0.35);
+      ctx.fillStyle = '#dffaff';
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.02)';
+    ctx.beginPath();
+    ctx.arc(W * 0.77, GROUND * 0.3, 46, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(77, 227, 255, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    for (const cloud of state.clouds) {
+      ctx.globalAlpha = cloud.a;
+      ctx.fillStyle = '#c7f4ff';
+      ctx.beginPath();
+      ctx.ellipse(cloud.x, cloud.y, 46 * cloud.s, 13 * cloud.s, 0, 0, Math.PI * 2);
+      ctx.ellipse(cloud.x + 36 * cloud.s, cloud.y + 4, 30 * cloud.s, 10 * cloud.s, 0, 0, Math.PI * 2);
+      ctx.ellipse(cloud.x - 34 * cloud.s, cloud.y + 5, 25 * cloud.s, 8 * cloud.s, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (const building of state.buildings) {
+      ctx.fillStyle = 'rgba(4, 12, 24, 0.8)';
+      ctx.fillRect(building.x, GROUND - building.h, building.w, building.h);
+      ctx.fillStyle = 'rgba(77, 227, 255, ' + building.a + ')';
+      for (let y = GROUND - building.h + 7; y < GROUND - 6; y += 11) {
+        ctx.fillRect(building.x + 4, y, 2, 2);
+        if (building.w > 18) ctx.fillRect(building.x + building.w - 7, y, 2, 2);
+      }
+    }
+
+    const groundGlow = ctx.createLinearGradient(0, GROUND - 8, 0, GROUND + 30);
+    groundGlow.addColorStop(0, 'rgba(77, 227, 255, 0.22)');
+    groundGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = groundGlow;
+    ctx.fillRect(0, GROUND - 8, W, 38);
+  }
+
+  function drawPipes() {
+    for (const pipe of state.pipes) {
+      const lowest = pipe.top + pipe.gap;
+      const drawPipe = (y, height, capY) => {
+        const gradient = ctx.createLinearGradient(pipe.x, 0, pipe.x + 74, 0);
+        if (pipe.hue === 188) {
+          gradient.addColorStop(0, '#0f6b74');
+          gradient.addColorStop(0.4, '#2bd7de');
+          gradient.addColorStop(0.7, '#7cf7f4');
+          gradient.addColorStop(1, '#0b565f');
+        } else {
+          gradient.addColorStop(0, '#473287');
+          gradient.addColorStop(0.4, '#9b7bff');
+          gradient.addColorStop(0.72, '#c9b6ff');
+          gradient.addColorStop(1, '#3b2a73');
+        }
+        ctx.save();
+        ctx.shadowColor = pipe.hue === 188 ? 'rgba(77, 227, 255, 0.45)' : 'rgba(155, 123, 255, 0.45)';
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = gradient;
+        ctx.fillRect(pipe.x, y, 74, height);
+        ctx.restore();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+        ctx.fillRect(pipe.x + 8, y + 5, 3, height - 10);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+        ctx.fillRect(pipe.x + 61, y + 5, 6, height - 10);
+
+        const capTop = capY === 'top' ? y + height - 22 : y;
+        ctx.fillStyle = gradient;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(pipe.x - 6, capTop, 86, 22, 4);
+        ctx.fill();
+        ctx.stroke();
+      };
+
+      drawPipe(-30, pipe.top + 30, 'bottom');
+      drawPipe(lowest, GROUND - lowest, 'top');
+    }
+  }
+
+  function drawBird() {
+    const bird = state.bird;
+    ctx.save();
+    ctx.translate(bird.x, bird.y);
+    ctx.rotate(bird.rot);
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(255, 226, 122, 0.55)';
+    ctx.shadowBlur = 24;
+    ctx.fillStyle = '#ffe27a';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bird.r + 2, bird.r, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    const body = ctx.createLinearGradient(-bird.r, -bird.r, bird.r, bird.r);
+    body.addColorStop(0, '#fff3b0');
+    body.addColorStop(0.55, '#ffd84d');
+    body.addColorStop(1, '#ff9f1c');
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bird.r, bird.r * 0.9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const wingLift = state.mode === 'playing' ? Math.sin(bird.wing) * 7 : Math.sin(state.elapsed * 4) * 2;
+    ctx.fillStyle = '#fff7d6';
+    ctx.beginPath();
+    ctx.ellipse(-5, 2 + wingLift * 0.25, 8, 5 + Math.abs(wingLift) * 0.4, -0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(160, 96, 0, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(6, -6, 5.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#10202c';
+    ctx.beginPath();
+    ctx.arc(7.6, -6, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.beginPath();
+    ctx.arc(6.6, -7.4, 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ff7a1a';
+    ctx.beginPath();
+    ctx.moveTo(11, -2);
+    ctx.lineTo(24, 2);
+    ctx.lineTo(11, 7);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const particle of state.particles) {
+      ctx.globalAlpha = clamp(particle.life / particle.max, 0, 1);
+      ctx.fillStyle = particle.color;
+      ctx.beginPath();
+      ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGround() {
+    ctx.fillStyle = '#050b14';
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = 'rgba(77, 227, 255, 0.9)';
+    ctx.fillRect(0, GROUND, W, 2);
+    ctx.globalAlpha = 0.16;
+    const offset = (state.elapsed * 158) % 32;
+    for (let x = -32 + offset; x < W + 32; x += 32) {
+      ctx.fillStyle = '#4de3ff';
+      ctx.fillRect(x, GROUND + 8, 1, 9);
+      ctx.fillRect(x + 16, GROUND + 18, 1, 6);
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(155, 123, 255, 0.08)';
+    ctx.fillRect(0, GROUND + 27, W, 1);
+  }
+
+  function drawHud() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = '700 52px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.fillText(String(state.score), W / 2 + 2, 86);
+    ctx.fillStyle = '#f4feff';
+    ctx.fillText(String(state.score), W / 2, 84);
+    ctx.restore();
+
+    ctx.save();
+    ctx.font = '600 10px "Cascadia Code", Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(180, 220, 235, 0.6)';
+    ctx.fillText('BEST ' + best, 18, 28);
+    ctx.textAlign = 'right';
+    ctx.fillText('SIGNAL ' + (state.mode === 'dead' ? 'LOST' : 'LIVE'), W - 18, 28);
+    ctx.restore();
+  }
+
+  function drawReady() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = '700 30px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = '#f4feff';
+    ctx.fillText('NEON DRIFT', W / 2, H * 0.25);
+    ctx.font = '500 10px "Cascadia Code", Consolas, monospace';
+    ctx.fillStyle = 'rgba(77, 227, 255, 0.85)';
+    ctx.fillText('FLAPPY // SIGNAL CHANNEL 01', W / 2, H * 0.25 + 22);
+
+    const pulse = 0.55 + Math.sin(state.elapsed * 3) * 0.25;
+    ctx.globalAlpha = pulse;
+    ctx.font = '600 12px "Cascadia Code", Consolas, monospace';
+    ctx.fillStyle = '#eafcff';
+    ctx.fillText('TAP  ·  CLICK  ·  SPACE', W / 2, H * 0.77);
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = 'rgba(77, 227, 255, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - 112, H * 0.68 - 4, 224, 46, 12);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawDead() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(3, 8, 16, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.font = '700 26px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = '#ff8ab8';
+    ctx.fillText('SIGNAL LOST', W / 2, H * 0.32);
+    ctx.font = '500 10px "Cascadia Code", Consolas, monospace';
+    ctx.fillStyle = 'rgba(180, 220, 235, 0.7)';
+    ctx.fillText('DRIFT RUN TERMINATED', W / 2, H * 0.32 + 22);
+
+    ctx.font = '700 58px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = '#f4feff';
+    ctx.fillText(String(state.score), W / 2, H * 0.45);
+
+    ctx.font = '500 11px "Cascadia Code", Consolas, monospace';
+    ctx.fillStyle = 'rgba(180, 220, 235, 0.6)';
+    ctx.fillText('BEST  ' + Math.max(best, state.score), W / 2, H * 0.49);
+
+    if (state.deadTimer > 0.55) {
+      const pulse = 0.55 + Math.sin(state.elapsed * 4) * 0.3;
+      ctx.globalAlpha = pulse;
+      ctx.font = '600 12px "Cascadia Code", Consolas, monospace';
+      ctx.fillStyle = '#7cf7f4';
+      ctx.fillText('TAP TO RECONNECT', W / 2, H * 0.62);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  function frame(timestamp) {
+    const dt = Math.min(0.033, (timestamp - (frame.last || timestamp)) / 1000 || 0.016);
+    frame.last = timestamp;
+    update(dt);
+
+    ctx.save();
+    if (state.shake > 0) {
+      ctx.translate(random(-1, 1) * state.shake * 7, random(-1, 1) * state.shake * 7);
+    }
+    drawBackground();
+    drawPipes();
+    drawGround();
+    drawParticles();
+    drawBird();
+    drawHud();
+    if (state.mode === 'ready') drawReady();
+    if (state.mode === 'dead') drawDead();
+    if (state.flash > 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, ' + state.flash * 0.35 + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.restore();
+
+    if (state.mode === 'dead' && state.score > best) {
+      best = state.score;
+      hintBest.textContent = String(best);
+      try { localStorage.setItem('friday-flappy-best', String(best)); } catch (_) { /* private mode */ }
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('keydown', (event) => {
+    if (event.code === 'Space' || event.code === 'ArrowUp' || event.code === 'KeyW') {
+      event.preventDefault();
+      flap();
+    }
+    if (event.code === 'KeyM') {
+      muted = !muted;
+      soundButton.textContent = muted ? 'sound off' : 'sound on';
+    }
+  });
+  canvas.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    flap();
+  });
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

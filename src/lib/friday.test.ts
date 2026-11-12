@@ -14,6 +14,31 @@ const settings: FridaySettings = {
   soundEffects: true,
   requireConfirmation: true,
   demoMode: true,
+  voiceLocale: 'en-IN',
+
+  sttProvider: 'local',
+  sttModel: 'small.en',
+  groqApiKey: '',
+
+  ttsProvider: 'edge',
+  ttsVoice: 'en-IN-NeerjaExpressiveNeural',
+
+  engineProvider: 'auto',
+  engineModel: 'nemotron-3.5-lightning-free',
+  openCodeApiKey: '',
+  nvidiaApiKey: '',
+  openRouterApiKey: '',
+  engineTemperature: 0.7,
+  engineMaxTokens: 4096,
+
+  voiceProvider: 'native',
+  elevenLabsApiKey: '',
+  elevenLabsVoiceId: 'Rachel',
+  elevenLabsModelId: 'eleven-labs-v1',
+  elevenLabsStability: 0.7,
+  elevenLabsSimilarity: 0.85,
+
+  developerAutoOpen: false,
 };
 
 describe('FRIDAY persona', () => {

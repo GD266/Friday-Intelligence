@@ -439,14 +439,45 @@
   margin-top: -3px;
 }
 
+.core-scene-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  filter: drop-shadow(0 0 38px rgb(var(--core-cyan) / 0.16));
+}
+
+.core-scene-frame canvas {
+  display: block;
+}
+
+.core-array__scan {
+  position: absolute;
+  inset: 9%;
+  border-radius: 9999px;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg 278deg,
+    rgb(var(--core-cyan) / 0.02) 278deg,
+    rgb(var(--core-cyan) / 0.18) 352deg,
+    transparent 360deg
+  );
+  -webkit-mask-image: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
+  mask-image: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
+  animation: coreSpin 16s linear infinite;
+  opacity: 0.7;
+  pointer-events: none;
+  z-index: 2;
+}
+
 .core-array__readout {
   position: absolute;
+  z-index: 3;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 0.46rem;
-  letter-spacing: 0.2em;
+  font-size: 0.56rem;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: rgb(var(--core-cyan) / 0.4);
-  text-shadow: 0 0 8px rgb(var(--core-cyan) / 0.18);
+  color: rgb(var(--core-cyan) / 0.55);
+  text-shadow: 0 0 10px rgb(var(--core-cyan) / 0.22);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -1148,6 +1179,34 @@
     transform: scaleY(1);
     opacity: 1;
   }
+}
+
+/* ========================================================================== */
+/* Project forge                                                             */
+/* ========================================================================== */
+
+.forge-hero {
+  background:
+    radial-gradient(38rem 20rem at 88% -10%, rgb(var(--core-cyan) / 0.12), transparent 62%),
+    radial-gradient(32rem 18rem at 4% 112%, rgb(var(--core-violet) / 0.13), transparent 64%),
+    linear-gradient(160deg, rgb(10 18 31 / 0.92), rgb(4 8 15 / 0.94));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+}
+
+.forge-project-preview {
+  background:
+    radial-gradient(24rem 16rem at 100% 0%, rgb(var(--core-violet) / 0.12), transparent 66%),
+    linear-gradient(150deg, rgb(14 20 36 / 0.84), rgb(5 9 17 / 0.9));
+}
+
+.forge-project-preview::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgb(255 255 255 / 0.018) 1px, transparent 1px);
+  background-size: 100% 5px;
+  opacity: 0.5;
 }
 
 /* ========================================================================== */

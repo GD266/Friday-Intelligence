@@ -13,6 +13,9 @@ import type {
   ConnectionStatus,
   Conversation,
   CoreOverlay,
+  DeveloperProject,
+  DeveloperTask,
+  EngineStatus,
   FridayMood,
   FridaySettings,
   Message,
@@ -400,12 +403,45 @@ export const DEFAULT_FRIDAY_SETTINGS: FridaySettings = {
   userName: '',
   voiceEnabled: true,
   autoSpeak: true,
-  voiceRate: 0.94,
+  voiceRate: 0.96,
   voicePitch: 1,
   voiceId: null,
   soundEffects: true,
   requireConfirmation: true,
-  demoMode: true,
+  demoMode: false,
+  voiceLocale: 'en-IN',
+
+  // STT defaults: local Whisper (no key, offline).
+  sttProvider: 'local',
+  sttModel: 'small.en',
+  groqApiKey: '',
+
+  // TTS defaults: Edge neural voices (no key, free).
+  ttsProvider: 'edge',
+  ttsVoice: 'en-IN-NeerjaExpressiveNeural',
+
+  engineProvider: 'auto',
+  engineModel: 'opencode/nemotron-3.5-lightning-free',
+  openCodeApiKey: '',
+  nvidiaApiKey: '',
+  openRouterApiKey: '',
+  engineTemperature: 0.65,
+  engineMaxTokens: 1400,
+
+  voiceProvider: 'auto',
+  elevenLabsApiKey: '',
+  elevenLabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
+  elevenLabsModelId: 'eleven_turbo_v2_5',
+  elevenLabsStability: 0.45,
+  elevenLabsSimilarity: 0.75,
+
+  developerAutoOpen: true,
+};
+
+export const DEFAULT_ENGINE_STATUS: EngineStatus = {
+  state: 'idle',
+  source: 'demo',
+  model: 'Local demo core',
 };
 
 interface AssistantStore {
@@ -419,6 +455,9 @@ interface AssistantStore {
   pendingAutomation: PendingAutomation | null;
   automationLog: AutomationLogEntry[];
   lastReply: string | null;
+  engineStatus: EngineStatus;
+  developerTask: DeveloperTask | null;
+  developerProjects: DeveloperProject[];
   updateSettings: (settings: Partial<FridaySettings>) => void;
   resetSettings: () => void;
   setMood: (mood: FridayMood) => void;
@@ -433,6 +472,10 @@ interface AssistantStore {
   updateAutomationLog: (id: string, update: Partial<AutomationLogEntry>) => void;
   clearAutomationLog: () => void;
   setLastReply: (lastReply: string | null) => void;
+  setEngineStatus: (status: Partial<EngineStatus>) => void;
+  setDeveloperTask: (task: DeveloperTask | null) => void;
+  updateDeveloperTask: (update: Partial<DeveloperTask>) => void;
+  addDeveloperProject: (project: DeveloperProject) => void;
 }
 
 export const useAssistantStore = create<AssistantStore>()(
@@ -448,6 +491,9 @@ export const useAssistantStore = create<AssistantStore>()(
       pendingAutomation: null,
       automationLog: [],
       lastReply: null,
+      engineStatus: DEFAULT_ENGINE_STATUS,
+      developerTask: null,
+      developerProjects: [],
       updateSettings: (settings) =>
         set((state) => ({ settings: { ...state.settings, ...settings } })),
       resetSettings: () => set({ settings: DEFAULT_FRIDAY_SETTINGS }),
@@ -469,11 +515,24 @@ export const useAssistantStore = create<AssistantStore>()(
         })),
       clearAutomationLog: () => set({ automationLog: [] }),
       setLastReply: (lastReply) => set({ lastReply }),
+      setEngineStatus: (status) =>
+        set((state) => ({
+          engineStatus: { ...state.engineStatus, ...status, checkedAt: status.checkedAt ?? new Date() },
+        })),
+      setDeveloperTask: (developerTask) => set({ developerTask }),
+      updateDeveloperTask: (update) =>
+        set((state) =>
+          state.developerTask ? { developerTask: { ...state.developerTask, ...update } } : state
+        ),
+      addDeveloperProject: (project) =>
+        set((state) => ({
+          developerProjects: [project, ...state.developerProjects].slice(0, 24),
+        })),
     }),
     {
       name: 'friday_assistant',
       storage: createStorage(),
-      version: 2,
+      version: 4,
       migrate: (persistedState, version) => {
         const state = persistedState as Partial<AssistantStore> | undefined;
         if (!state?.settings) return state as AssistantStore;
@@ -485,11 +544,28 @@ export const useAssistantStore = create<AssistantStore>()(
 
         return {
           ...state,
+          developerProjects: state.developerProjects ?? [],
           settings: {
             ...DEFAULT_FRIDAY_SETTINGS,
             ...state.settings,
             ...(version < 2 && isLegacyDefault
-              ? { voicePitch: DEFAULT_FRIDAY_SETTINGS.voicePitch, voiceRate: DEFAULT_FRIDAY_SETTINGS.voiceRate }
+              ? {
+                  voicePitch: DEFAULT_FRIDAY_SETTINGS.voicePitch,
+                  voiceRate: DEFAULT_FRIDAY_SETTINGS.voiceRate,
+                }
+              : {}),
+            // Demo-only was the old default and there was no toggle to opt into
+            // it. New installs should try the engine, then fall back safely.
+            ...(version < 3 ? { demoMode: false } : {}),
+            // Phase 4: new STT/TTS provider fields with safe defaults.
+            ...(version < 4
+              ? {
+                  sttProvider: 'local',
+                  sttModel: 'small.en',
+                  groqApiKey: '',
+                  ttsProvider: 'edge',
+                  ttsVoice: 'en-IN-NeerjaExpressiveNeural',
+                }
               : {}),
           },
         } as AssistantStore;
@@ -497,6 +573,7 @@ export const useAssistantStore = create<AssistantStore>()(
       partialize: (state) => ({
         settings: state.settings,
         automationLog: state.automationLog,
+        developerProjects: state.developerProjects,
       }),
     }
   )

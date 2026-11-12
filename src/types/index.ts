@@ -12,6 +12,11 @@ export type AIProviderId =
   | 'anthropic'
   | 'google'
   | 'ollama'
+  | 'opencode'
+  | 'nvidia'
+  | 'openrouter'
+  | 'groq'
+  | 'local'
   | 'custom';
 
 export interface AIProvider {
@@ -146,6 +151,8 @@ export interface MessageContent {
 export interface MessageMetadata {
   modelId?: string;
   providerId?: AIProviderId;
+  source?: 'opencode-auth' | 'environment' | 'settings' | 'fallback';
+  error?: string;
   tokenCount?: {
     input: number;
     output: number;
@@ -154,7 +161,6 @@ export interface MessageMetadata {
   cost?: number;
   latencyMs?: number;
   finishReason?: 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error';
-  error?: string;
   isStreaming?: boolean;
 }
 
@@ -685,7 +691,7 @@ export interface UIState {
   commandPalette: CommandPaletteState;
 }
 
-export type CoreOverlay = 'settings' | 'automation' | 'log';
+export type CoreOverlay = 'settings' | 'automation' | 'log' | 'forge';
 
 export interface ModalState {
   id: string;
@@ -755,6 +761,38 @@ export interface FridaySettings {
   soundEffects: boolean;
   requireConfirmation: boolean;
   demoMode: boolean;
+
+  // Voice recognition locale.
+  voiceLocale: string;
+
+  // Speech-to-text provider.
+  sttProvider: 'local' | 'groq' | 'native';
+  sttModel: string;
+  groqApiKey: string;
+
+  // Text-to-speech provider.
+  ttsProvider: 'edge' | 'elevenlabs' | 'native';
+  ttsVoice: string;
+
+  // Intelligence engine. API keys stay in local storage on this workstation.
+  engineProvider: EngineProvider | 'auto';
+  engineModel: string;
+  openCodeApiKey: string;
+  nvidiaApiKey: string;
+  openRouterApiKey: string;
+  engineTemperature: number;
+  engineMaxTokens: number;
+
+  // Realistic speech through ElevenLabs, with a native fallback.
+  voiceProvider: 'auto' | 'elevenlabs' | 'native';
+  elevenLabsApiKey: string;
+  elevenLabsVoiceId: string;
+  elevenLabsModelId: string;
+  elevenLabsStability: number;
+  elevenLabsSimilarity: number;
+
+  // Project forge.
+  developerAutoOpen: boolean;
 }
 
 export type AutomationRisk = 'low' | 'medium' | 'high';
@@ -805,10 +843,20 @@ export interface PendingAutomation {
   requestedBy: 'text' | 'voice' | 'command-palette' | 'automation-page';
 }
 
+export interface EdgeVoice {
+  shortName: string;
+  locale: string;
+  gender: string;
+  friendlyName: string;
+  recommended: boolean;
+}
+
 export interface VoiceOption {
   id: string;
   name: string;
   language: string;
+  provider?: 'native' | 'elevenlabs' | 'edge';
+  description?: string;
 }
 
 export type SpeechEventKind = 'started' | 'transcript' | 'audioLevel' | 'stopped' | 'error';
@@ -836,4 +884,116 @@ export interface FridayReply {
   actionId?: string;
   argument?: string;
   source: 'greeting' | 'command' | 'conversation' | 'fallback';
+}
+
+// ============================================================================
+// Intelligence Engine, ElevenLabs & Developer Forge
+// ============================================================================
+
+export type EngineProvider = 'opencode' | 'nvidia' | 'openrouter' | 'groq';
+export type EngineSource = EngineProvider | 'local' | 'demo';
+export type EngineConnectionState = 'idle' | 'connecting' | 'online' | 'fallback' | 'error';
+
+export interface EngineStatus {
+  state: EngineConnectionState;
+  source: EngineSource;
+  model: string;
+  detail?: string;
+  latencyMs?: number;
+  checkedAt?: Date;
+}
+
+export interface EngineModel {
+  /** Stable UI id, for example `opencode/nemotron-3.5-lightning-free`. */
+  id: string;
+  /** Model id sent to the provider API. */
+  apiModel: string;
+  provider: EngineProvider;
+  name: string;
+  family: string;
+  description: string;
+  contextWindow: number;
+  speed: 'fast' | 'balanced' | 'deep';
+  free: boolean;
+  recommended?: boolean;
+  vision?: boolean;
+}
+
+export interface EngineCredentialStatus {
+  opencode: boolean;
+  nvidia: boolean;
+  openrouter: boolean;
+  elevenlabs: boolean;
+  source: 'opencode-auth' | 'environment' | 'settings' | 'none';
+}
+
+export interface AiChatUsage {
+  input?: number;
+  output?: number;
+  total?: number;
+}
+
+export interface AiChatResult {
+  text: string;
+  provider: EngineProvider;
+  model: string;
+  latencyMs: number;
+  usage?: AiChatUsage;
+}
+
+export interface ElevenLabsVoice {
+  id: string;
+  name: string;
+  description?: string;
+  labels?: Record<string, string>;
+  previewUrl?: string;
+}
+
+export interface DeveloperFile {
+  path: string;
+  content: string;
+}
+
+export interface DeveloperProject {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  path: string;
+  prompt: string;
+  engine: EngineSource;
+  model?: string;
+  files: Array<{ path: string; bytes: number }>;
+  createdAt: Date;
+}
+
+export type DeveloperTaskStatus =
+  | 'idle'
+  | 'planning'
+  | 'generating'
+  | 'writing'
+  | 'ready'
+  | 'error';
+
+export type DeveloperStepStatus = 'pending' | 'running' | 'complete' | 'failed';
+
+export interface DeveloperTaskStep {
+  id: string;
+  label: string;
+  status: DeveloperStepStatus;
+  detail?: string;
+  startedAt?: Date;
+  completedAt?: Date;
+}
+
+export interface DeveloperTask {
+  id: string;
+  prompt: string;
+  status: DeveloperTaskStatus;
+  steps: DeveloperTaskStep[];
+  projectId?: string;
+  error?: string;
+  engine?: EngineSource;
+  startedAt: Date;
+  completedAt?: Date;
 }

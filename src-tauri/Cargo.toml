@@ -17,3 +17,8 @@ serde_json = "1"
 sysinfo = "0.40"
 enigo = "0.6"
 robius-speech = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+base64 = "0.22"
+zip = "0.6"
+tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "time"] }
+msedge-tts = { version = "0.4", features = ["blocking", "rustls"] }

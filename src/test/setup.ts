@@ -44,4 +44,23 @@ if (typeof window !== 'undefined' && !window.localStorage) {
   } catch {
     // The test environment may expose a non-configurable global.
   }
+
+  // Mock matchMedia for reduced-motion queries in CoreScene tests
+  try {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query.includes('prefers-reduced-motion: reduce'),
+        media: query,
+        onchange: null,
+        addListener: () => {}, // deprecated
+        removeListener: () => {}, // deprecated
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }),
+    });
+  } catch {
+    // Already defined or non-configurable
+  }
 }

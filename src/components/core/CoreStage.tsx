@@ -3,9 +3,9 @@ import {
   Activity,
   ArrowUpRight,
   AudioWaveform,
-  Camera,
   Command,
   Cpu,
+  Hammer,
   HelpCircle,
   History,
   MemoryStick,
@@ -22,8 +22,9 @@ import { cn, formatPercent, formatRelativeTime, formatUptime } from '@/lib/utils
 import { useAssistantStore, useConversationsStore, useSystemStore, useUIStore } from '@/stores';
 import { getAddress } from '@/lib/friday';
 import { AUTOMATION_ACTIONS } from '@/lib/automation';
+import { findEngineModel } from '@/lib/ai';
 import type { FridayMood, Message } from '@/types';
-import { CoreOrb } from './CoreOrb';
+import { CoreScene } from './CoreScene';
 import { HudBackground } from './HudBackground';
 import { DirectiveDock } from './DirectiveDock';
 
@@ -84,7 +85,7 @@ const HudButton = ({
     )}
   >
     <Icon className="h-3.5 w-3.5" />
-    <span className="hidden font-mono text-[0.56rem] uppercase tracking-[0.16em] xl:inline">
+    <span className="hidden font-mono text-[0.62rem] uppercase tracking-[0.14em] xl:inline">
       {label}
     </span>
   </button>
@@ -92,7 +93,7 @@ const HudButton = ({
 
 const RailLabel = ({ children }: { children: ReactNode }) => (
   <div className="flex items-center gap-2">
-    <span className="font-mono text-[0.55rem] font-semibold uppercase tracking-[0.24em] text-graphite-500">
+    <span className="font-mono text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-graphite-500">
       {children}
     </span>
     <span className="h-px flex-1 bg-gradient-to-r from-white/[0.08] to-transparent" />
@@ -101,10 +102,10 @@ const RailLabel = ({ children }: { children: ReactNode }) => (
 
 const RailRow = ({ label, value }: { label: string; value: string }) => (
   <div className="flex items-center justify-between gap-3">
-    <span className="font-mono text-[0.58rem] uppercase tracking-[0.14em] text-graphite-600">
+    <span className="font-mono text-[0.63rem] uppercase tracking-[0.12em] text-graphite-500">
       {label}
     </span>
-    <span className="truncate font-mono text-[0.65rem] text-graphite-300">{value}</span>
+    <span className="truncate font-mono text-[0.72rem] text-graphite-300">{value}</span>
   </div>
 );
 
@@ -129,13 +130,13 @@ const Meter = ({
   return (
     <div>
       <div className="flex items-end justify-between">
-        <span className="flex items-center gap-1.5 font-mono text-[0.56rem] uppercase tracking-[0.18em] text-graphite-500">
+        <span className="flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-graphite-500">
           <Icon className="h-3 w-3" />
           {label}
         </span>
         <span className="font-mono text-sm text-graphite-200">
           {Math.round(clamped)}
-          <span className="ml-0.5 text-[0.6rem] text-graphite-600">%</span>
+          <span className="ml-0.5 text-[0.66rem] text-graphite-600">%</span>
         </span>
       </div>
       <div className="mt-2 flex h-9 items-end gap-[3px]" aria-hidden="true">
@@ -160,6 +161,9 @@ const Meter = ({
 
 const SystemRail = () => {
   const status = useSystemStore((state) => state.status);
+  const engineStatus = useAssistantStore((state) => state.engineStatus);
+  const engineModel = useAssistantStore((state) => state.settings.engineModel);
+  const selectedModel = findEngineModel(engineModel);
   const memoryPercent =
     status.memoryTotal > 0 ? (status.memoryUsage / status.memoryTotal) * 100 : 0;
 
@@ -185,13 +189,26 @@ const SystemRail = () => {
       <div className="rounded border border-violet-400/10 bg-violet-400/[0.03] px-3 py-2.5">
         <div className="flex items-center gap-2">
           <Sparkles className="h-3 w-3 text-violet-300/70" />
-          <span className="font-mono text-[0.55rem] uppercase tracking-[0.18em] text-violet-200/80">
-            local demo core
+          <span className="max-w-[10rem] truncate font-mono text-[0.6rem] uppercase tracking-[0.14em] text-violet-200/80">
+            {selectedModel?.name ?? 'local core'}
           </span>
+          <span
+            className={cn(
+              'ml-auto h-1.5 w-1.5 rounded-full',
+              engineStatus.state === 'online'
+                ? 'bg-emerald-400'
+                : engineStatus.state === 'error'
+                  ? 'bg-red-400'
+                  : 'bg-amber-300'
+            )}
+          />
         </div>
-        <p className="mt-1.5 text-[0.62rem] leading-relaxed text-graphite-500">
-          Deterministic persona. No cloud model connected. Voice, telemetry, and automation are
-          live.
+        <p className="mt-1.5 text-[0.68rem] leading-relaxed text-graphite-500">
+          {engineStatus.state === 'online'
+            ? 'Cloud reasoning online. Project Forge, voice, telemetry, and audited automation are live.'
+            : engineStatus.state === 'error'
+              ? 'Engine link failed. FRIDAY is holding on the verified local fallback.'
+              : 'Free engine chain armed. FRIDAY falls back to the local core if every link fails.'}
         </p>
       </div>
     </aside>
@@ -221,7 +238,7 @@ const SignalRail = () => {
         <RailLabel>voice link</RailLabel>
         <div className="mt-3 rounded border border-white/[0.05] bg-white/[0.015] px-3 py-3">
           <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 font-mono text-[0.56rem] uppercase tracking-[0.16em] text-graphite-400">
+            <span className="flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-graphite-400">
               <AudioWaveform className="h-3 w-3 text-cyan-300/70" />
               {isListening ? 'capturing' : isSpeaking ? 'transmitting' : 'ready'}
             </span>
@@ -249,8 +266,14 @@ const SignalRail = () => {
               />
             ))}
           </div>
-          <div className="mt-2 flex items-center justify-between font-mono text-[0.5rem] uppercase tracking-[0.14em] text-graphite-600">
-            <span>{settings.voiceId ? 'manual voice' : 'auto / female'}</span>
+          <div className="mt-2 flex items-center justify-between font-mono text-[0.56rem] uppercase tracking-[0.12em] text-graphite-600">
+            <span>
+              {settings.elevenLabsApiKey
+                ? 'elevenlabs studio'
+                : settings.voiceId
+                  ? 'manual voice'
+                  : 'auto / female'}
+            </span>
             <span>en-gb</span>
           </div>
         </div>
@@ -260,11 +283,11 @@ const SignalRail = () => {
         <RailLabel>automation</RailLabel>
         <div className="mt-3 rounded border border-white/[0.05] bg-white/[0.015] px-3 py-3">
           <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 font-mono text-[0.56rem] uppercase tracking-[0.16em] text-graphite-400">
+            <span className="flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-graphite-400">
               <ShieldCheck className="h-3 w-3 text-emerald-300/70" />
               armed
             </span>
-            <span className="font-mono text-[0.55rem] text-graphite-600">
+            <span className="font-mono text-[0.6rem] text-graphite-600">
               {AUTOMATION_ACTIONS.length} actions
             </span>
           </div>
@@ -274,10 +297,10 @@ const SignalRail = () => {
           </div>
           {lastAction ? (
             <div className="mt-2 border-t border-white/[0.05] pt-2">
-              <p className="truncate font-mono text-[0.55rem] uppercase tracking-[0.1em] text-graphite-500">
+              <p className="truncate font-mono text-[0.6rem] uppercase tracking-[0.1em] text-graphite-400">
                 {lastAction.label}
               </p>
-              <div className="mt-1 flex items-center justify-between font-mono text-[0.5rem] uppercase tracking-wider text-graphite-600">
+              <div className="mt-1 flex items-center justify-between font-mono text-[0.56rem] uppercase tracking-wider text-graphite-600">
                 <span
                   className={
                     lastAction.status === 'success'
@@ -293,14 +316,14 @@ const SignalRail = () => {
               </div>
             </div>
           ) : (
-            <p className="mt-2 border-t border-white/[0.05] pt-2 text-[0.6rem] leading-relaxed text-graphite-600">
+            <p className="mt-2 border-t border-white/[0.05] pt-2 text-[0.66rem] leading-relaxed text-graphite-600">
               No actions executed. The audit log is clear.
             </p>
           )}
           <button
             type="button"
             onClick={() => openOverlay('automation')}
-            className="mt-2 flex items-center gap-1 font-mono text-[0.52rem] uppercase tracking-[0.16em] text-cyan-300/70 transition-colors hover:text-cyan-200"
+            className="mt-2 flex items-center gap-1 font-mono text-[0.58rem] uppercase tracking-[0.14em] text-cyan-300/70 transition-colors hover:text-cyan-200"
           >
             open console
             <ArrowUpRight className="h-2.5 w-2.5" />
@@ -314,14 +337,14 @@ const SignalRail = () => {
           <p className="truncate text-xs text-graphite-300">
             {activeConversation?.title ?? 'Unfiled session'}
           </p>
-          <p className="mt-1 font-mono text-[0.52rem] uppercase tracking-[0.14em] text-graphite-600">
+          <p className="mt-1 font-mono text-[0.58rem] uppercase tracking-[0.12em] text-graphite-600">
             {activeConversation?.messages.length ?? 0} transmissions
           </p>
           <div className="mt-2 flex items-center gap-2">
             <button
               type="button"
               onClick={() => openOverlay('log')}
-              className="flex items-center gap-1 font-mono text-[0.52rem] uppercase tracking-[0.14em] text-cyan-300/70 transition-colors hover:text-cyan-200"
+              className="flex items-center gap-1 font-mono text-[0.58rem] uppercase tracking-[0.12em] text-cyan-300/70 transition-colors hover:text-cyan-200"
             >
               <History className="h-2.5 w-2.5" />
               open log
@@ -330,7 +353,7 @@ const SignalRail = () => {
             <button
               type="button"
               onClick={() => createConversation()}
-              className="flex items-center gap-1 font-mono text-[0.52rem] uppercase tracking-[0.14em] text-graphite-500 transition-colors hover:text-graphite-200"
+              className="flex items-center gap-1 font-mono text-[0.58rem] uppercase tracking-[0.12em] text-graphite-500 transition-colors hover:text-graphite-200"
             >
               <Plus className="h-2.5 w-2.5" />
               new
@@ -348,30 +371,31 @@ const CoreArray = ({
 }: {
   mood: FridayMood;
   audioLevel: number;
-}) => (
-  <div className="core-array relative flex h-[17.5rem] w-[17.5rem] flex-shrink-0 items-center justify-center sm:h-[21rem] sm:w-[21rem] xl:h-[22rem] xl:w-[22rem]">
-    <div className="core-array__aura" aria-hidden="true" />
-    <div className="core-array__ring core-array__ring--a" aria-hidden="true" />
-    <div className="core-array__ring core-array__ring--b" aria-hidden="true" />
-    <div className="core-array__ring core-array__ring--c" aria-hidden="true" />
-    <div className="core-array__sweep" aria-hidden="true" />
-    <div className="core-array__axis core-array__axis--x" aria-hidden="true" />
-    <div className="core-array__axis core-array__axis--y" aria-hidden="true" />
-    <div className="core-array__node core-array__node--north" aria-hidden="true" />
-    <div className="core-array__node core-array__node--east" aria-hidden="true" />
-    <div className="core-array__node core-array__node--south" aria-hidden="true" />
-    <div className="core-array__node core-array__node--west" aria-hidden="true" />
+}) => {
+  const engineStatus = useAssistantStore((state) => state.engineStatus);
+  const model = findEngineModel(useAssistantStore((state) => state.settings.engineModel));
 
-    <span className="core-array__readout core-array__readout--tl">CORE.01</span>
-    <span className="core-array__readout core-array__readout--tr">SYNC 99.8</span>
-    <span className="core-array__readout core-array__readout--bl">
-      {mood === 'listening' ? 'AUDIO.IN' : 'AUDIO.EN-GB'}
-    </span>
-    <span className="core-array__readout core-array__readout--br">LOCAL.CORE</span>
+  return (
+    <div className="core-array relative flex h-[20rem] w-[20rem] flex-shrink-0 items-center justify-center sm:h-[24rem] sm:w-[24rem] xl:h-[26rem] xl:w-[26rem]">
+      <div className="core-array__aura" aria-hidden="true" />
+      <div className="core-array__scan" aria-hidden="true" />
+      <div className="core-scene-frame">
+        <CoreScene mood={mood} audioLevel={audioLevel} />
+      </div>
 
-    <CoreOrb mood={mood} size="hero" audioLevel={audioLevel} />
-  </div>
-);
+      <span className="core-array__readout core-array__readout--tl">CORE.03</span>
+      <span className="core-array__readout core-array__readout--tr">
+        {engineStatus.state === 'online' ? 'LINK.ONLINE' : 'FALLBACK.CORE'}
+      </span>
+      <span className="core-array__readout core-array__readout--bl">
+        {mood === 'listening' ? 'AUDIO.IN' : 'AUDIO.EN-GB'}
+      </span>
+      <span className="core-array__readout core-array__readout--br">
+        {(model?.name ?? 'LOCAL.CORE').replace(/\s+/g, '.').toUpperCase()}
+      </span>
+    </div>
+  );
+};
 
 const QuickDirective = ({
   icon: Icon,
@@ -388,7 +412,7 @@ const QuickDirective = ({
     type="button"
     onClick={onClick}
     disabled={disabled}
-    className="group flex items-center gap-2 rounded border border-white/[0.06] bg-white/[0.015] px-2.5 py-1.5 font-mono text-[0.55rem] uppercase tracking-[0.14em] text-graphite-500 transition-all duration-200 hover:border-cyan-300/25 hover:bg-cyan-300/[0.04] hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-35"
+    className="group flex items-center gap-2 rounded border border-white/[0.06] bg-white/[0.015] px-2.5 py-1.5 font-mono text-[0.6rem] uppercase tracking-[0.12em] text-graphite-500 transition-all duration-200 hover:border-cyan-300/25 hover:bg-cyan-300/[0.04] hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-35"
   >
     <Icon className="h-3 w-3 text-graphite-600 transition-colors group-hover:text-cyan-300/80" />
     {label}
@@ -411,6 +435,7 @@ export const CoreStage = ({
 }: CoreStageProps) => {
   const settings = useAssistantStore((state) => state.settings);
   const mood = useAssistantStore((state) => state.mood);
+  const engineStatus = useAssistantStore((state) => state.engineStatus);
   const openOverlay = useUIStore((state) => state.openOverlay);
   const toggleCommandPalette = useUIStore((state) => state.toggleCommandPalette);
   const [now, setNow] = useState(() => new Date());
@@ -448,7 +473,7 @@ export const CoreStage = ({
     mood === 'listening'
       ? transcript || 'The voice channel is open. Speak your directive.'
       : mood === 'thinking'
-        ? 'Parsing your request through the local command core.'
+        ? `Routing through ${engineStatus.model}.`
         : latestReply ||
           'All systems are nominal. The core is standing by for your first directive.';
 
@@ -497,13 +522,22 @@ export const CoreStage = ({
         </div>
 
         <div className="hidden items-center gap-2 self-center rounded-full border border-white/[0.05] bg-white/[0.015] px-3 py-1.5 md:flex">
-          <span className="h-1 w-1 rounded-full bg-emerald-400" />
-          <span className="font-mono text-[0.5rem] uppercase tracking-[0.18em] text-graphite-500">
-            core online
+          <span
+            className={cn(
+              'h-1 w-1 rounded-full',
+              engineStatus.state === 'online'
+                ? 'bg-emerald-400'
+                : engineStatus.state === 'error'
+                  ? 'bg-red-400'
+                  : 'bg-amber-300'
+            )}
+          />
+          <span className="font-mono text-[0.56rem] uppercase tracking-[0.16em] text-graphite-500">
+            {engineStatus.state === 'online' ? 'reasoning online' : 'fallback ready'}
           </span>
           <span className="h-2.5 w-px bg-white/[0.08]" />
-          <span className="font-mono text-[0.5rem] uppercase tracking-[0.16em] text-graphite-600">
-            local demo
+          <span className="max-w-[12rem] truncate font-mono text-[0.56rem] uppercase tracking-[0.14em] text-graphite-600">
+            {engineStatus.model}
           </span>
         </div>
 
@@ -516,6 +550,7 @@ export const CoreStage = ({
           </div>
 
           <HudButton icon={ScrollText} label="Log" onClick={() => openOverlay('log')} />
+          <HudButton icon={Hammer} label="Forge" onClick={() => openOverlay('forge')} accent />
           <HudButton
             icon={Workflow}
             label="Automation"
@@ -598,6 +633,16 @@ export const CoreStage = ({
 
               <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5">
                 <QuickDirective
+                  icon={Hammer}
+                  label="forge flappy bird"
+                  onClick={() =>
+                    onSend(
+                      'Build a 2D Flappy Bird game with neon visuals, scoring, sound, and a restart flow.'
+                    )
+                  }
+                  disabled={isBusy}
+                />
+                <QuickDirective
                   icon={Activity}
                   label="system status"
                   onClick={() => onSend('System status')}
@@ -607,12 +652,6 @@ export const CoreStage = ({
                   icon={Terminal}
                   label="open notepad"
                   onClick={() => onSend('Open Notepad')}
-                  disabled={isBusy}
-                />
-                <QuickDirective
-                  icon={Camera}
-                  label="screenshot"
-                  onClick={() => onSend('Take a screenshot')}
                   disabled={isBusy}
                 />
                 <QuickDirective
@@ -644,7 +683,7 @@ export const CoreStage = ({
         </div>
       </main>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between px-4 pb-1 font-mono text-[0.46rem] uppercase tracking-[0.2em] text-graphite-700 sm:px-6">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between px-4 pb-1 font-mono text-[0.52rem] uppercase tracking-[0.18em] text-graphite-600 sm:px-6">
         <span>friday intelligence // orbital interface</span>
         <span className="hidden items-center gap-2 sm:flex">
           <span>build 0.2.0</span>

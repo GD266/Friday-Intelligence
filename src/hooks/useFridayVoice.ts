@@ -3,59 +3,44 @@ import { useAssistantStore } from '@/stores';
 import {
   getErrorMessage,
   isTauriRuntime,
-  listenEvent,
 } from '@/lib/runtime';
 import {
-  canUseDictation,
   canUseSpeech,
-  cancelNativeDictation,
   speakText,
-  startNativeDictation,
-  stopNativeDictation,
   stopSpeech,
   subscribeSpeechLifecycle,
+  transcribeLocal,
+  transcribeGroq,
+  sttLocalStatus,
+  type EdgeVoice,
 } from '@/lib/voice';
-import type { SpeechEventPayload } from '@/types';
+import { normalizeTranscript } from '@/lib/voice-norm';
+import { MicrophoneRecorder, RecordingResult } from '@/lib/audio/recorder';
 
-interface BrowserRecognitionResult {
-  isFinal: boolean;
-  0: { transcript: string };
+// Track recent transcripts for duplicate detection (5-second window, max 5 entries)
+const RECENT_TRANSCRIPT_WINDOW_MS = 5000;
+const MAX_RECENT_TRANSCRIPTS = 5;
+
+interface RecentTranscript {
+  text: string;
+  timestamp: number;
 }
 
-interface BrowserRecognitionEvent {
-  resultIndex: number;
-  results: {
-    length: number;
-    [index: number]: BrowserRecognitionResult;
-  };
+let recentTranscripts: RecentTranscript[] = [];
+
+function isDuplicateTranscript(text: string): boolean {
+  const now = Date.now();
+  recentTranscripts = recentTranscripts.filter(
+    (t) => now - t.timestamp < RECENT_TRANSCRIPT_WINDOW_MS
+  );
+  return recentTranscripts.some((t) => t.text.toLowerCase() === text.toLowerCase());
 }
 
-interface BrowserRecognitionErrorEvent {
-  error: string;
-}
-
-interface BrowserRecognition {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onstart: (() => void) | null;
-  onresult: ((event: BrowserRecognitionEvent) => void) | null;
-  onerror: ((event: BrowserRecognitionErrorEvent) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-}
-
-type BrowserRecognitionConstructor = new () => BrowserRecognition;
-
-function getBrowserRecognition(): BrowserRecognitionConstructor | null {
-  if (typeof window === 'undefined') return null;
-  const scope = window as unknown as {
-    SpeechRecognition?: BrowserRecognitionConstructor;
-    webkitSpeechRecognition?: BrowserRecognitionConstructor;
-  };
-  return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
+function addRecentTranscript(text: string): void {
+  recentTranscripts.push({ text, timestamp: Date.now() });
+  if (recentTranscripts.length > MAX_RECENT_TRANSCRIPTS) {
+    recentTranscripts = recentTranscripts.slice(-MAX_RECENT_TRANSCRIPTS);
+  }
 }
 
 export interface UseFridayVoiceOptions {
@@ -68,82 +53,20 @@ export interface UseFridayVoiceOptions {
  */
 export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const browserRecognitionRef = useRef<BrowserRecognition | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [availableVoices, setAvailableVoices] = useState<EdgeVoice[]>([]);
+  const [sttStatus, setSttStatus] = useState<{
+    engineReady: boolean;
+    modelReady: boolean;
+    ready: boolean;
+    message: string;
+  } | null>(null);
+
   const onTranscriptRef = useRef(options.onTranscript);
+  const recorderRef = useRef<MicrophoneRecorder | null>(null);
 
   onTranscriptRef.current = options.onTranscript;
-
-  const isListening = useAssistantStore((state) => state.isListening);
-  const isSpeaking = useAssistantStore((state) => state.isSpeaking);
-  const audioLevel = useAssistantStore((state) => state.audioLevel);
-  const transcript = useAssistantStore((state) => state.transcript);
-
-  // Native dictation event stream (Windows SAPI through Rust).
-  useEffect(() => {
-    let disposed = false;
-    let cleanup: (() => void) | undefined;
-
-    void listenEvent<SpeechEventPayload>('friday://speech', (payload) => {
-      if (disposed) return;
-      const store = useAssistantStore.getState();
-
-      switch (payload.kind) {
-        case 'started': {
-          store.setListening(true);
-          store.setMood('listening');
-          store.setStatusText('Listening');
-          break;
-        }
-        case 'audioLevel': {
-          store.setAudioLevel(Math.min(1, Math.max(0, payload.level ?? 0)));
-          break;
-        }
-        case 'transcript': {
-          store.setTranscript(payload.text ?? '');
-          if (payload.isFinal && payload.text?.trim()) {
-            const finalText = payload.text.trim();
-            store.setListening(false);
-            store.setAudioLevel(0);
-            store.setMood('idle');
-            store.setStatusText('Online');
-            onTranscriptRef.current?.(finalText);
-            void stopNativeDictation();
-          }
-          break;
-        }
-        case 'stopped': {
-          store.setListening(false);
-          store.setAudioLevel(0);
-          store.setStatusText('Online');
-          if (useAssistantStore.getState().mood === 'listening') {
-            store.setMood('idle');
-          }
-          break;
-        }
-        case 'error': {
-          store.setListening(false);
-          store.setAudioLevel(0);
-          store.setMood('idle');
-          store.setStatusText('Online');
-          setVoiceError(payload.message ?? 'Speech recognition stopped unexpectedly.');
-          break;
-        }
-        default:
-          break;
-      }
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten?.();
-      } else {
-        cleanup = unlisten ?? undefined;
-      }
-    });
-
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, []);
 
   // Native TTS lifecycle (speech:start / speech:finish / speech:error).
   useEffect(() => {
@@ -171,7 +94,7 @@ export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
       }
     }).then((unsubscribe) => {
       if (disposed) {
-        unsubscribe();
+        unsubscribe?.();
       } else {
         cleanup = unsubscribe;
       }
@@ -183,12 +106,44 @@ export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
     };
   }, []);
 
-  // Release the microphone if the view unmounts mid-dictation.
+  // Load Edge voices and STT status on mount (Tauri only).
+  useEffect(() => {
+    let disposed = false;
+
+    async function load(): Promise<void> {
+      if (!isTauriRuntime()) return;
+
+      try {
+        const { listEdgeVoices } = await import('@/lib/voice');
+        const voices = await listEdgeVoices();
+        if (!disposed) setAvailableVoices(voices);
+      } catch {
+        // Non-fatal.
+      }
+
+      try {
+        const status = await sttLocalStatus();
+        if (!disposed) setSttStatus(status);
+      } catch {
+        // Non-fatal.
+      }
+    }
+
+    void load();
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  // Cleanup on unmount.
   useEffect(
     () => () => {
-      browserRecognitionRef.current?.abort();
-      browserRecognitionRef.current = null;
-      if (isTauriRuntime()) void cancelNativeDictation();
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+      if (isTauriRuntime()) {
+        void stopSpeech();
+      }
     },
     []
   );
@@ -232,135 +187,162 @@ export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
     return true;
   }, []);
 
+  const stopListening = useCallback(async () => {
+    const store = useAssistantStore.getState();
+    if (!store.isListening) return;
+
+    // Stop recording and get audio.
+    let recording: RecordingResult | null = null;
+    if (recorderRef.current) {
+      try {
+        recording = await recorderRef.current.stop();
+      } catch (error) {
+        store.setListening(false);
+        store.setAudioLevel(0);
+        store.setStatusText('Online');
+        if (store.mood === 'listening') store.setMood('idle');
+        setVoiceError(error instanceof Error ? error.message : 'Recording failed.');
+        return;
+      }
+      recorderRef.current = null;
+    } else {
+      store.setListening(false);
+      store.setAudioLevel(0);
+      store.setStatusText('Online');
+      if (store.mood === 'listening') store.setMood('idle');
+      return;
+    }
+
+    store.setAudioLevel(0);
+    store.setStatusText('Processing...');
+
+    if (!recording || recording.silent) {
+      store.setListening(false);
+      store.setStatusText('Online');
+      if (store.mood === 'listening') store.setMood('idle');
+      setVoiceError('No speech detected. Hold the button and speak clearly.');
+      return;
+    }
+
+    setIsTranscribing(true);
+
+    try {
+      const settings = store.settings;
+      let result: { text: string; empty: boolean; provider: string; model: string; elapsedMs: number };
+
+      if (settings.sttProvider === 'groq') {
+        result = await transcribeGroq(recording.audioBase64, settings);
+      } else {
+        // Default to local Whisper.
+        result = await transcribeLocal(recording.audioBase64, settings);
+      }
+
+      if (result.empty || !result.text.trim()) {
+        store.setListening(false);
+        store.setStatusText('Online');
+        if (store.mood === 'listening') store.setMood('idle');
+        setVoiceError('Could not understand. Try again in a quieter room.');
+        return;
+      }
+
+      const rawText = result.text.trim();
+
+      // Check for duplicate submissions
+      if (isDuplicateTranscript(rawText)) {
+        store.setTranscript('');
+        store.setListening(false);
+        store.setStatusText('Duplicate transcript ignored');
+        setTimeout(() => store.setStatusText('Online'), 2000);
+        return;
+      }
+
+      // Apply speech normalization
+      const { original, normalized, corrected } = normalizeTranscript(rawText);
+      addRecentTranscript(rawText);
+
+      store.setTranscript(normalized);
+      store.setListening(false);
+      store.setStatusText('Online');
+      if (store.mood === 'listening') store.setMood('idle');
+
+      // Log normalization in development
+      if (corrected && import.meta.env.DEV) {
+        console.debug('[VoiceNorm]', {
+          original,
+          normalized,
+          reason: 'Common recognition error correction',
+          locale: settings.voiceLocale,
+          provider: result.provider,
+        });
+      }
+
+      // Send the normalized text (not raw) to the handler
+      onTranscriptRef.current?.(normalized);
+    } catch (error) {
+      store.setListening(false);
+      store.setStatusText('Online');
+      if (store.mood === 'listening') store.setMood('idle');
+      setVoiceError(getErrorMessage(error));
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, []);
+
   const startListening = useCallback(async () => {
     const store = useAssistantStore.getState();
     if (store.isListening) return;
 
     setVoiceError(null);
     store.setTranscript('');
-    store.setAudioLevel(0);
+    setAudioLevel(0);
 
     if (store.isSpeaking) {
       await stopSpeaking();
     }
 
-    if (isTauriRuntime()) {
-      try {
-        await startNativeDictation();
-        store.setListening(true);
-        store.setMood('listening');
-        store.setStatusText('Listening');
-      } catch (error) {
-        store.setListening(false);
-        store.setMood('idle');
-        store.setStatusText('Online');
-        setVoiceError(getErrorMessage(error));
-      }
-      return;
-    }
-
-    const Recognition = getBrowserRecognition();
-    if (!Recognition) {
-      setVoiceError('Push-to-talk is available in the FRIDAY desktop app.');
-      return;
+    // Create recorder if needed.
+    if (!recorderRef.current) {
+      recorderRef.current = new MicrophoneRecorder({
+        onLevel: (level) => {
+          const current = useAssistantStore.getState();
+          current.setAudioLevel(level);
+          setAudioLevel(level);
+        },
+        onAutoStop: () => {
+          void stopListening();
+        },
+      });
     }
 
     try {
-      const recognition = new Recognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = 'en-GB';
-
-      recognition.onstart = () => {
-        const current = useAssistantStore.getState();
-        current.setListening(true);
-        current.setMood('listening');
-        current.setStatusText('Listening');
-      };
-
-      recognition.onresult = (event) => {
-        let interim = '';
-        let finalText = '';
-
-        for (let index = event.resultIndex; index < event.results.length; index += 1) {
-          const result = event.results[index];
-          if (result.isFinal) {
-            finalText += result[0].transcript;
-          } else {
-            interim += result[0].transcript;
-          }
-        }
-
-        const current = useAssistantStore.getState();
-        if (interim) current.setTranscript(interim);
-
-        if (finalText.trim()) {
-          current.setTranscript(finalText);
-          current.setListening(false);
-          current.setAudioLevel(0);
-          current.setStatusText('Online');
-          if (current.mood === 'listening') current.setMood('idle');
-          onTranscriptRef.current?.(finalText.trim());
-        }
-      };
-
-      recognition.onerror = (event) => {
-        const current = useAssistantStore.getState();
-        current.setListening(false);
-        current.setAudioLevel(0);
-        current.setStatusText('Online');
-        if (current.mood === 'listening') current.setMood('idle');
-        setVoiceError(
-          event.error === 'not-allowed'
-            ? 'Microphone access was denied. Allow microphone access and try again.'
-            : `Speech recognition error: ${event.error}.`
-        );
-      };
-
-      recognition.onend = () => {
-        const current = useAssistantStore.getState();
-        current.setListening(false);
-        current.setAudioLevel(0);
-        current.setStatusText('Online');
-        if (current.mood === 'listening') current.setMood('idle');
-        browserRecognitionRef.current = null;
-      };
-
-      browserRecognitionRef.current = recognition;
-      recognition.start();
+      await recorderRef.current.start();
+      store.setListening(true);
+      store.setMood('listening');
+      store.setStatusText('Listening');
     } catch (error) {
-      setVoiceError(getErrorMessage(error));
+      store.setListening(false);
+      store.setMood('idle');
+      store.setStatusText('Online');
+      setVoiceError(error instanceof Error ? error.message : 'Could not start recording.');
+      recorderRef.current = null;
     }
-  }, [stopSpeaking]);
-
-  const stopListening = useCallback(async () => {
-    if (isTauriRuntime()) {
-      await stopNativeDictation();
-    } else {
-      browserRecognitionRef.current?.stop();
-    }
-
-    const store = useAssistantStore.getState();
-    store.setListening(false);
-    store.setAudioLevel(0);
-    store.setStatusText('Online');
-    if (store.mood === 'listening') store.setMood('idle');
-  }, []);
+  }, [stopSpeaking, stopListening]);
 
   const cancelListening = useCallback(async () => {
-    if (isTauriRuntime()) {
-      await cancelNativeDictation();
-    } else {
-      browserRecognitionRef.current?.abort();
-      browserRecognitionRef.current = null;
+    const store = useAssistantStore.getState();
+
+    if (recorderRef.current) {
+      recorderRef.current.cancel();
+      recorderRef.current = null;
     }
 
-    const store = useAssistantStore.getState();
     store.setListening(false);
     store.setAudioLevel(0);
     store.setTranscript('');
     store.setStatusText('Online');
     if (store.mood === 'listening') store.setMood('idle');
+    setAudioLevel(0);
+    setVoiceError(null);
   }, []);
 
   const toggleListening = useCallback(async () => {
@@ -371,6 +353,16 @@ export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
     }
   }, [startListening, stopListening]);
 
+  // Refresh STT status (called after install).
+  const refreshSttStatus = useCallback(async () => {
+    try {
+      const status = await sttLocalStatus();
+      setSttStatus(status);
+    } catch {
+      // Non-fatal.
+    }
+  }, []);
+
   return {
     speak,
     stopSpeaking,
@@ -380,11 +372,15 @@ export function useFridayVoice(options: UseFridayVoiceOptions = {}) {
     toggleListening,
     voiceError,
     clearVoiceError: () => setVoiceError(null),
-    isListening,
-    isSpeaking,
+    isListening: useAssistantStore((state) => state.isListening),
+    isSpeaking: useAssistantStore((state) => state.isSpeaking),
     audioLevel,
-    transcript,
+    transcript: useAssistantStore((state) => state.transcript),
     speechSupported: canUseSpeech(),
-    dictationSupported: canUseDictation(),
+    dictationSupported: true, // Always available in Tauri with our recorder.
+    isTranscribing,
+    availableVoices,
+    sttStatus,
+    refreshSttStatus,
   };
 }
