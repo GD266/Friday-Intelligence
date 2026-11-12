@@ -1,56 +1,42 @@
 import { type ReactNode } from 'react';
-import { useUIStore } from '@/stores';
-import { cn } from '@/lib/utils';
-import TopBar from '../topbar/TopBar';
-import Sidebar from '../sidebar/Sidebar';
-import ActivityPanel from '../activity/ActivityPanel';
-import { useEffect } from 'react';
+import { useConversationsStore, useUIStore } from '@/stores';
+import TopBar from '@/components/topbar/TopBar';
+import Sidebar from '@/components/sidebar/Sidebar';
+import ActivityPanel from '@/components/activity/ActivityPanel';
 
 export interface LayoutProps {
   children?: ReactNode;
   title?: string;
   subtitle?: string;
-  showActivityPanel?: boolean;
 }
 
-export const Layout = ({ children, title, subtitle, showActivityPanel = false }: LayoutProps) => {
-  const {
-    sidebar,
-    toggleSidebar,
-    collapseSidebar,
-    expandSidebar,
-    setSidebarSection,
-    toggleActivityPanel,
-    setActivityTab,
-    addToast,
-  } = useUIStore();
+export const Layout = ({ children, title, subtitle }: LayoutProps) => {
+  const sidebar = useUIStore((state) => state.sidebar);
+  const activityPanel = useUIStore((state) => state.activityPanel);
+  const toggleSidebar = useUIStore((state) => state.toggleSidebar);
+  const setSidebarSection = useUIStore((state) => state.setSidebarSection);
+  const toggleActivityPanel = useUIStore((state) => state.toggleActivityPanel);
+  const setActivityTab = useUIStore((state) => state.setActivityTab);
+  const createConversation = useConversationsStore((state) => state.createConversation);
 
-  useEffect(() => {
-    // Initialize connection check
-    const loadStore = document.getElementById('friday-load-store') as HTMLDivElement | null;
-    if (loadStore) {
-      // Store is already initialized via script
-    }
-  }, []);
-
-  const mainContentWidth = sidebar.isCollapsed ? 'calc(100vw - 80px)' : 'calc(100vw - 280px)';
+  const handleNewConversation = () => {
+    createConversation();
+    setSidebarSection('conversations');
+  };
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Top Bar */}
+    <div className="flex h-screen flex-col overflow-hidden bg-graphite-950 text-graphite-100">
       <TopBar
-        title={title || 'FRIDAY Intelligence'}
-        subtitle={subtitle || 'Premium AI Desktop Workspace'}
+        title={title ?? 'FRIDAY Intelligence'}
+        subtitle={subtitle ?? 'Premium AI Desktop Workspace'}
         onToggleSidebar={toggleSidebar}
         onToggleActivity={toggleActivityPanel}
-        isConnected={sidebar.isOpen} // Mock: connected when sidebar is open
-        currentModel={sidebar.activeSection}
-        showActivityPanel={showActivityPanel || sidebar.isOpen}
+        onOpenSettings={() => setSidebarSection('settings')}
+        onNewConversation={handleNewConversation}
+        showActivityPanel={activityPanel.isOpen}
       />
 
-      {/* Main Content */}
-      <div className="flex flex-1">
-        {/* Sidebar */}
+      <div className="flex min-h-0 flex-1">
         <Sidebar
           activeSection={sidebar.activeSection}
           onSectionChange={setSidebarSection}
@@ -58,26 +44,16 @@ export const Layout = ({ children, title, subtitle, showActivityPanel = false }:
           onToggleCollapse={toggleSidebar}
         />
 
-        {/* Main Workspace */}
-        <main
-          className={cn(
-            'flex-1 w-full overflow-auto p-4',
-            !sidebar.isCollapsed && 'pl-4',
-            !sidebar.isCollapsed && 'pr-4'
-          )}
-          style={{ width: mainContentWidth }}
-        >
-          {children}
-        </main>
-      </div>
+        <main className="min-h-0 min-w-0 flex-1 overflow-hidden p-4">{children}</main>
 
-      {/* Activity Panel */}
-      <ActivityPanel
-        isOpen={sidebar.isOpen}
-        onToggle={toggleActivityPanel}
-        events={[]}
-        onEventSelect={() => {}}
-      />
+        <ActivityPanel
+          isOpen={activityPanel.isOpen}
+          activeTab={activityPanel.activeTab}
+          onTabChange={setActivityTab}
+          onClose={toggleActivityPanel}
+          events={[]}
+        />
+      </div>
     </div>
   );
 };

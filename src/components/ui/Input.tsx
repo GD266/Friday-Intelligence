@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useEffect, useRef, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { cn } from '../../lib/utils';
 
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
@@ -59,16 +59,22 @@ export interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElemen
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
   ({ className, label, error, hint, id, autoResize, ...props }, ref) => {
     const textareaId = id || label?.toLowerCase().replace(/\s+/g, '-');
-    const textareaRef = ref as React.RefObject<HTMLTextAreaElement>;
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-    if (autoResize) {
-      useEffect(() => {
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto';
-          textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
-        }
-      }, [props.value]);
-    }
+    const setTextareaRef = (node: HTMLTextAreaElement | null) => {
+      textareaRef.current = node;
+      if (typeof ref === 'function') {
+        ref(node);
+      } else if (ref) {
+        ref.current = node;
+      }
+    };
+
+    useEffect(() => {
+      if (!autoResize || !textareaRef.current) return;
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }, [autoResize, props.value]);
 
     return (
       <div className="w-full">
@@ -78,7 +84,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
           </label>
         )}
         <textarea
-          ref={textareaRef}
+          ref={setTextareaRef}
           id={textareaId}
           className={cn(
             'w-full px-3 py-2 bg-surface-elevated border text-graphite-100 placeholder-graphite-500 rounded transition-all duration-fast resize-none',

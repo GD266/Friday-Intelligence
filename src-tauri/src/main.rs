@@ -1,11 +1,8 @@
-use tauri::Manager;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  tauri::Builder::default()
-    .setup(|app| {
-      // Initialize any plugins or state here
-      Ok(())
-    })
-    .run(tauri::generate_context!())
-    .expect("error running tauri application");
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .run(tauri::generate_context!())
+        .expect("error while running FRIDAY Intelligence");
 }

@@ -1,4 +1,8 @@
-import { type ReactNode } from 'react';
+import { useState, type FormEvent } from 'react';
+import { Paperclip } from 'lucide-react';
+import { cn, formatRelativeTime } from '@/lib/utils';
+import type { Message as ConversationMessage } from '@/types';
+import { Button } from '../ui/Button';
 
 export interface MessageProps {
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -33,14 +37,14 @@ export const Message = ({ role, content, metadata }: MessageProps) => {
     tool: 'w-6 h-6 rounded-full bg-indigo-500 flex-shrink-0 self-start',
   };
 
-  const timestamp = metadata?.timestamp ? `${Math.floor((new Date().getTime() - metadata.timestamp.getTime()) / 60000)}m ago` : '';
+  const timestamp = metadata?.timestamp ? formatRelativeTime(metadata.timestamp) : '';
 
   return (
     <div className={cn('w-full mb-3', roleClasses[role])}>
       <div className={cn('flex items-start gap-3', roleClasses[role])}>
         <div className={cn('w-6 h-6 rounded-full flex-shrink-0', avatarClasses[role])} />
         <div className={cn('flex-1', bubbleClasses[role])}>
-          <p className="text-graphite-100 break-words">{content}</p>
+          <p className="text-graphite-100 break-words whitespace-pre-wrap">{content}</p>
           {timestamp && <p className="mt-1 text-[0.65em] opacity-60">{timestamp}</p>}
         </div>
       </div>
@@ -65,61 +69,66 @@ export const MessageInput = ({
   onAttachment,
   isDisabled = false,
   showModelSelector = true,
-  currentModel = 'Llama 3.1 8B',
+  currentModel = 'No model configured',
 }: MessageInputProps) => {
-  const [inputValue, setInputValue] = React.useState('');
+  const [inputValue, setInputValue] = useState('');
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      if (onSend && inputValue.trim()) {
-        onSend(inputValue.trim());
-        setInputValue('');
-      }
-    }
-  };
-
-  const handleAttachmentClick = () => {
-    onAttachment?.();
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const content = inputValue.trim();
+    if (!onSend || !content || isDisabled) return;
+    onSend(content);
+    setInputValue('');
   };
 
   return (
-    <div className="flex items-end gap-3 p-4 border-t border-border-subtle bg-graphite-950">
+    <form
+      className="flex items-end gap-3 p-4 border-t border-border-subtle bg-graphite-950"
+      onSubmit={handleSubmit}
+    >
       <button
+        type="button"
         className="p-1.5 rounded-md hover:bg-graphite-800 transition-colors flex-shrink-0"
-        onClick={handleAttachmentClick}
+        onClick={onAttachment}
         aria-label="Attach file"
         disabled={isDisabled}
       >
-        ✕
+        <Paperclip className="h-4 w-4" />
       </button>
+
+      {showModelSelector && (
+        <span className="hidden sm:inline-flex px-2 py-1 rounded bg-surface-elevated border border-border-primary text-xs text-graphite-400">
+          {currentModel}
+        </span>
+      )}
 
       <div className="flex-1 flex gap-2">
         <input
           placeholder={placeholder}
           value={inputValue}
-          onValueChange={(e: React.ChangeEvent<HTMLInputElement>) => setInputValue(e.target.value)}
+          onChange={(event) => setInputValue(event.target.value)}
           disabled={isDisabled}
           className="w-full px-3 py-2 bg-surface-elevated border text-graphite-100 placeholder-graphite-500 rounded transition-all duration-fast focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue disabled:opacity-40 disabled:cursor-not-allowed"
         />
 
-        <button
-          onClick={() => onSend?.(inputValue.trim())}
+        <Button
+          type="submit"
+          variant="primary"
+          size="sm"
           disabled={!inputValue.trim() || isDisabled}
-          className="px-3 py-1.5 text-sm font-medium"
         >
           Send
-        </button>
+        </Button>
       </div>
-    </div>
+    </form>
   );
 };
 
 MessageInput.displayName = 'MessageInput';
 
 export interface ConversationAreaProps {
-  messages: any[];
-  onMessageAdded?: (message: any) => void;
+  messages: ConversationMessage[];
+  onMessageAdded?: (content: string) => void;
   showModelSelector?: boolean;
 }
 
@@ -129,29 +138,33 @@ export const ConversationArea = ({
   showModelSelector = true,
 }: ConversationAreaProps) => {
   return (
-    <div className="flex-1 overflow-y-auto pr-4">
-      {messages.map((msg, index) => (
-        <Message
-          key={msg.id || index}
-          role={msg.role}
-          content={msg.content.text || msg.content}
-          metadata={{
-            model: msg.metadata?.modelId,
-            timestamp: msg.metadata?.createdAt,
-            isStreaming: msg.metadata?.isStreaming,
-          }}
-        />
-      ))}
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex-1 overflow-y-auto pr-4">
+        {messages.map((message) => (
+          <Message
+            key={message.id}
+            role={message.role}
+            content={message.content.text ?? ''}
+            metadata={{
+              model: message.metadata.modelId,
+              timestamp: message.createdAt,
+              isStreaming: message.metadata.isStreaming,
+            }}
+          />
+        ))}
 
-      {messages.length === 0 && (
-        <div className="p-8 text-center text-graphite-500">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="8" y1="12" x2="16" y2="12" />
-          </svg>
-          <p>Start a conversation by sending a message</p>
-        </div>
-      )}
+        {messages.length === 0 && (
+          <div className="flex h-full min-h-64 flex-col items-center justify-center p-8 text-center text-graphite-500">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="8" y1="12" x2="16" y2="12" />
+            </svg>
+            <p className="mt-2">Start a conversation by sending a message</p>
+          </div>
+        )}
+      </div>
+
+      {onMessageAdded && <MessageInput onSend={onMessageAdded} showModelSelector={showModelSelector} />}
     </div>
   );
 };

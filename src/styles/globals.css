@@ -105,7 +105,8 @@
   }
 
   .scrollbar-thin {
-    @apply scrollbar-thin scrollbar-track-transparent scrollbar-thumb-graphite-700;
+    scrollbar-width: thin;
+    scrollbar-color: #404040 transparent;
   }
 
   .text-balance {

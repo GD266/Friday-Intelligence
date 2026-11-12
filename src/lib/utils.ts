@@ -116,9 +116,13 @@ export function sortBy<T>(
   return [...array].sort((a, b) => {
     const aVal = typeof key === 'function' ? key(a) : a[key];
     const bVal = typeof key === 'function' ? key(b) : b[key];
-    if (typeof aVal === 'number') return order === 'asc' ? aVal - bVal : bVal - aVal;
-    if (aVal < bVal) return order === 'asc' ? -1 : 1;
-    if (aVal > bVal) return order === 'asc' ? 1 : -1;
+    if (typeof aVal === 'number' && typeof bVal === 'number') {
+      return order === 'asc' ? aVal - bVal : bVal - aVal;
+    }
+    const aText = String(aVal);
+    const bText = String(bVal);
+    if (aText < bText) return order === 'asc' ? -1 : 1;
+    if (aText > bText) return order === 'asc' ? 1 : -1;
     return 0;
   });
 }

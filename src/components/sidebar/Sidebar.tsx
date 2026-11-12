@@ -1,40 +1,55 @@
 import { type ReactNode } from 'react';
-import { cn } from '../../lib/utils';
+import {
+  Bot,
+  Brain,
+  FolderKanban,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+  Workflow,
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { SidebarSection as SidebarSectionId } from '@/types';
 
 export interface SidebarItemProps {
   icon: ReactNode;
   label: string;
   onClick?: () => void;
   isActive?: boolean;
-  onToggle?: (section: string) => void;
+  isCollapsed?: boolean;
   isDanger?: boolean;
   disabled?: boolean;
 }
 
-export const SidebarItem = ({ icon, label, onClick, isActive = false, isDanger = false, disabled = false, onToggle }: SidebarItemProps) => {
-  const hoverClasses = 'hover:bg-graphite-800 hover:text-graphite-100';
-  const activeClasses = 'bg-accent-blue/10 text-accent-blue border-l-2 border-accent-blue';
-  const dangerClasses = 'text-red-400 hover:bg-red-600/10 hover:text-red-300';
-
-  let finalClasses = cn(
-    'flex items-center gap-3 w-full px-3 py-2 text-sm font-medium text-graphite-400 rounded transition-all duration-fast',
-    isActive ? activeClasses : '',
-    disabled && 'cursor-not-allowed opacity-40'
-  );
-
-  if (isDanger) {
-    finalClasses = cn(finalClasses, dangerClasses);
-  } else if (isActive) {
-    finalClasses = cn(finalClasses, activeClasses);
-  } else {
-    finalClasses = cn(finalClasses, hoverClasses);
-  }
-
+export const SidebarItem = ({
+  icon,
+  label,
+  onClick,
+  isActive = false,
+  isCollapsed = false,
+  isDanger = false,
+  disabled = false,
+}: SidebarItemProps) => {
   return (
-    <div className={finalClasses} onClick={onClick} onMouseEnter={() => disabled || onToggle?.(label)}>
+    <button
+      type="button"
+      className={cn(
+        'flex w-full items-center gap-3 rounded px-3 py-2 text-sm font-medium transition-all duration-fast',
+        'text-graphite-400 hover:bg-graphite-800 hover:text-graphite-100',
+        isActive && 'bg-accent-blue/10 text-accent-blue border-l-2 border-accent-blue',
+        isDanger && 'text-red-400 hover:bg-red-600/10 hover:text-red-300',
+        disabled && 'cursor-not-allowed opacity-40',
+        isCollapsed && 'justify-center px-2'
+      )}
+      onClick={onClick}
+      disabled={disabled}
+      aria-current={isActive ? 'page' : undefined}
+      title={isCollapsed ? label : undefined}
+    >
       {icon}
-      <span>{label}</span>
-    </div>
+      {!isCollapsed && <span>{label}</span>}
+    </button>
   );
 };
 
@@ -47,59 +62,70 @@ export interface SidebarSectionProps {
 }
 
 export const SidebarSection = ({ title, description, icon }: SidebarSectionProps) => (
-  <div className="text-xs font-medium text-graphite-500 uppercase tracking-wider mb-2 p-2">
-    {title}
-    {description && <span className="ml-1 text-[0.65em] opacity-50 bg-graphite-900/50 px-1 rounded">{description}</span>}
+  <div className="mb-2 flex items-center gap-2 p-2 text-xs font-medium uppercase tracking-wider text-graphite-500">
+    {icon}
+    <span>{title}</span>
+    {description && (
+      <span className="ml-1 rounded bg-graphite-900/50 px-1 text-[0.65em] opacity-50">{description}</span>
+    )}
   </div>
 );
 
 SidebarSection.displayName = 'SidebarSection';
 
 export interface SidebarProps {
-  activeSection: string;
-  onSectionChange: (section: string) => void;
+  activeSection: SidebarSectionId;
+  onSectionChange: (section: SidebarSectionId) => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
 }
 
-export const Sidebar = ({ activeSection, onSectionChange, isCollapsed = false, onToggleCollapse }: SidebarProps) => {
-  const navItems = [
-    { id: 'conversations', label: 'Conversations' },
-    { id: 'projects', label: 'Projects' },
-    { id: 'agents', label: 'Agents' },
-    { id: 'memory', label: 'Memory' },
-    { id: 'automation', label: 'Automation' },
-    { id: 'settings', label: 'Settings' },
+export const Sidebar = ({
+  activeSection,
+  onSectionChange,
+  isCollapsed = false,
+  onToggleCollapse,
+}: SidebarProps) => {
+  const navItems: Array<{ id: SidebarSectionId; label: string; icon: ReactNode }> = [
+    { id: 'conversations', label: 'Conversations', icon: <MessageSquare className="h-4 w-4 flex-shrink-0" /> },
+    { id: 'projects', label: 'Projects', icon: <FolderKanban className="h-4 w-4 flex-shrink-0" /> },
+    { id: 'agents', label: 'Agents', icon: <Bot className="h-4 w-4 flex-shrink-0" /> },
+    { id: 'memory', label: 'Memory', icon: <Brain className="h-4 w-4 flex-shrink-0" /> },
+    { id: 'automation', label: 'Automation', icon: <Workflow className="h-4 w-4 flex-shrink-0" /> },
+    { id: 'settings', label: 'Settings', icon: <Settings className="h-4 w-4 flex-shrink-0" /> },
   ];
 
-  const collapsedWidth = isCollapsed ? 64 : 280;
-  const mainContentWidth = isCollapsed ? 'calc(100vw - 80px)' : 'calc(100vw - 280px)';
+  const collapsedWidth = 80;
+  const expandedWidth = 280;
 
   return (
     <aside
-      className={cn('w-72 h-full bg-graphite-950 border-r border-border-subtle flex-shrink-0', isCollapsed && 'r-20')}
-      style={{ width: collapsedWidth }}
+      className="h-full flex-shrink-0 border-r border-border-subtle bg-graphite-950 transition-[width] duration-200"
+      style={{ width: isCollapsed ? collapsedWidth : expandedWidth }}
     >
       <div className="flex h-full flex-col">
-        <header className="flex h-20 items-center justify-between px-4 pt-3">
+        <header className={cn('flex h-20 items-center justify-between pt-3', isCollapsed ? 'px-2' : 'px-4')}>
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-md bg-accent-blue flex items-center justify-center">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-accent-blue text-white">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <rect x="3" y="11" width="18" height="11" rx="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
             </div>
-            <span className={cn('text-lg font-semibold', isCollapsed && 'hidden')}>
-              FRIDAY Intelligence
-            </span>
+            {!isCollapsed && <span className="text-lg font-semibold">FRIDAY Intelligence</span>}
           </div>
-          <button onClick={onToggleCollapse} aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
-            ☰
+          <button
+            type="button"
+            className="rounded-md p-1.5 text-graphite-400 hover:bg-graphite-800 hover:text-graphite-100"
+            onClick={onToggleCollapse}
+            aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {isCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
           </button>
         </header>
 
-        <nav className="flex-1 overflow-y-auto">
-          <section className="SidebarSection">Navigate</section>
+        <nav className="flex-1 overflow-y-auto px-2 py-2">
+          {!isCollapsed && <SidebarSection title="Navigate" />}
           <div className="space-y-1">
             {navItems.map((item) => (
               <SidebarItem
@@ -107,14 +133,14 @@ export const Sidebar = ({ activeSection, onSectionChange, isCollapsed = false, o
                 icon={item.icon}
                 label={item.label}
                 isActive={activeSection === item.id}
-                onToggle={onSectionChange}
-                disabled={false}
+                isCollapsed={isCollapsed}
+                onClick={() => onSectionChange(item.id)}
               />
             ))}
           </div>
         </nav>
 
-        <footer className="p-4 border-t border-border-subtle">
+        <footer className={cn('border-t border-border-subtle p-4', isCollapsed && 'text-center')}>
           <div className="text-xs text-graphite-500">v0.1.0</div>
         </footer>
       </div>

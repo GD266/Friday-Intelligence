@@ -23,12 +23,14 @@ export default {
         },
         accent: {
           blue: {
+            DEFAULT: '#3b82f6',
             400: '#60a5fa',
             500: '#3b82f6',
             600: '#2563eb',
             700: '#1d4ed8',
           },
           violet: {
+            DEFAULT: '#8b5cf6',
             400: '#a78bfa',
             500: '#8b5cf6',
             600: '#7c3aed',
@@ -43,6 +45,7 @@ export default {
         border: {
           DEFAULT: '#2a2a2a',
           subtle: '#1f1f1f',
+          primary: '#2a2a2a',
         },
       },
       fontFamily: {
