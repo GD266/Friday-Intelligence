@@ -21,6 +21,21 @@ export function formatDuration(ms: number): string {
   return `${(ms / 3600000).toFixed(1)}h`;
 }
 
+export function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+export function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return '0%';
+  return `${Math.round(value)}%`;
+}
+
 export function formatRelativeTime(date: Date): string {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();

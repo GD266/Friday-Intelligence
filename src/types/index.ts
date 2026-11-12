@@ -661,6 +661,9 @@ export interface SystemStatus {
   tauriVersion: string;
   platform: string;
   arch: string;
+  hostname?: string;
+  os?: string;
+  cpuName?: string;
 }
 
 export interface ConnectionStatus {
@@ -676,40 +679,13 @@ export interface ConnectionStatus {
 // ============================================================================
 
 export interface UIState {
-  sidebar: SidebarState;
-  activityPanel: ActivityPanelState;
+  overlay: CoreOverlay | null;
   modals: ModalState[];
   toasts: ToastState[];
   commandPalette: CommandPaletteState;
 }
 
-export interface SidebarState {
-  isOpen: boolean;
-  isCollapsed: boolean;
-  activeSection: SidebarSection;
-  width: number;
-}
-
-export type SidebarSection =
-  | 'conversations'
-  | 'projects'
-  | 'agents'
-  | 'memory'
-  | 'automation'
-  | 'settings';
-
-export interface ActivityPanelState {
-  isOpen: boolean;
-  width: number;
-  activeTab: ActivityTab;
-}
-
-export type ActivityTab =
-  | 'agents'
-  | 'tasks'
-  | 'tools'
-  | 'system'
-  | 'logs';
+export type CoreOverlay = 'settings' | 'automation' | 'log';
 
 export interface ModalState {
   id: string;
@@ -760,4 +736,104 @@ export interface CommandResult {
   category: string;
   keywords: string[];
   action: () => void;
+}
+
+// ============================================================================
+// FRIDAY Assistant, Voice & Automation Types
+// ============================================================================
+
+export type FridayMood = 'idle' | 'listening' | 'thinking' | 'speaking' | 'alert';
+
+export interface FridaySettings {
+  addressAs: 'sir' | 'name';
+  userName: string;
+  voiceEnabled: boolean;
+  autoSpeak: boolean;
+  voiceRate: number;
+  voicePitch: number;
+  voiceId: string | null;
+  soundEffects: boolean;
+  requireConfirmation: boolean;
+  demoMode: boolean;
+}
+
+export type AutomationRisk = 'low' | 'medium' | 'high';
+
+export type AutomationCategory =
+  | 'apps'
+  | 'folders'
+  | 'system'
+  | 'media'
+  | 'window'
+  | 'input'
+  | 'web'
+  | 'info';
+
+export interface AutomationAction {
+  id: string;
+  label: string;
+  description: string;
+  category: AutomationCategory;
+  risk: AutomationRisk;
+  keywords: string[];
+  requiresConfirmation: boolean;
+  argumentLabel?: string;
+}
+
+export interface AutomationResult {
+  success: boolean;
+  message: string;
+  action: string;
+}
+
+export type AutomationStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+
+export interface AutomationLogEntry {
+  id: string;
+  actionId: string;
+  label: string;
+  risk: AutomationRisk;
+  status: AutomationStatus;
+  message: string;
+  timestamp: Date;
+  durationMs?: number;
+}
+
+export interface PendingAutomation {
+  action: AutomationAction;
+  argument?: string;
+  requestedBy: 'text' | 'voice' | 'command-palette' | 'automation-page';
+}
+
+export interface VoiceOption {
+  id: string;
+  name: string;
+  language: string;
+}
+
+export type SpeechEventKind = 'started' | 'transcript' | 'audioLevel' | 'stopped' | 'error';
+
+export interface SpeechEventPayload {
+  kind: SpeechEventKind;
+  text?: string;
+  isFinal?: boolean;
+  level?: number;
+  message?: string;
+}
+
+export interface SystemSnapshot {
+  cpuUsage: number;
+  memoryUsage: number;
+  memoryTotal: number;
+  uptime: number;
+  hostname: string;
+  os: string;
+  cpuName: string;
+}
+
+export interface FridayReply {
+  text: string;
+  actionId?: string;
+  argument?: string;
+  source: 'greeting' | 'command' | 'conversation' | 'fallback';
 }

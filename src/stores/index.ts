@@ -5,18 +5,21 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { generateId } from '../lib/utils';
 import type {
-  ActivityPanelState,
-  ActivityTab,
   Agent,
   AgentConfig,
   AgentPermissions,
   AgentTask,
+  AutomationLogEntry,
   ConnectionStatus,
   Conversation,
+  CoreOverlay,
+  FridayMood,
+  FridaySettings,
   Message,
+  MessageMetadata,
+  MessageRole,
+  PendingAutomation,
   Project,
-  SidebarSection,
-  SidebarState,
   SystemStatus,
   ToastState,
 } from '../types';
@@ -35,60 +38,33 @@ const createStorage = () => createJSONStorage(() => localStorage, { reviver: dat
 // ============================================================================
 
 interface UIStore {
-  sidebar: SidebarState;
-  activityPanel: ActivityPanelState;
+  overlay: CoreOverlay | null;
   toasts: ToastState[];
-  toggleSidebar: () => void;
-  collapseSidebar: () => void;
-  expandSidebar: () => void;
-  setSidebarSection: (section: SidebarSection) => void;
-  toggleActivityPanel: () => void;
-  setActivityTab: (tab: ActivityTab) => void;
+  isCommandPaletteOpen: boolean;
+  openOverlay: (overlay: CoreOverlay) => void;
+  closeOverlay: () => void;
   addToast: (toast: Omit<ToastState, 'id'> & { id?: string }) => void;
   removeToast: (id: string) => void;
+  setCommandPaletteOpen: (open: boolean) => void;
+  toggleCommandPalette: () => void;
 }
 
-export const useUIStore = create<UIStore>()(
-  persist(
-    (set) => ({
-      sidebar: {
-        isOpen: true,
-        isCollapsed: false,
-        activeSection: 'conversations',
-        width: 280,
-      },
-      activityPanel: {
-        isOpen: false,
-        width: 320,
-        activeTab: 'agents',
-      },
-      toasts: [],
-      toggleSidebar: () =>
-        set((state) => ({
-          sidebar: { ...state.sidebar, isCollapsed: !state.sidebar.isCollapsed },
-        })),
-      collapseSidebar: () =>
-        set((state) => ({ sidebar: { ...state.sidebar, isCollapsed: true } })),
-      expandSidebar: () =>
-        set((state) => ({ sidebar: { ...state.sidebar, isCollapsed: false } })),
-      setSidebarSection: (section) =>
-        set((state) => ({ sidebar: { ...state.sidebar, activeSection: section } })),
-      toggleActivityPanel: () =>
-        set((state) => ({
-          activityPanel: { ...state.activityPanel, isOpen: !state.activityPanel.isOpen },
-        })),
-      setActivityTab: (tab) =>
-        set((state) => ({ activityPanel: { ...state.activityPanel, activeTab: tab } })),
-      addToast: (toast) =>
-        set((state) => ({
-          toasts: [...state.toasts, { ...toast, id: toast.id ?? generateId('toast') }],
-        })),
-      removeToast: (id) =>
-        set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) })),
-    }),
-    { name: 'friday_ui', storage: createStorage() }
-  )
-);
+export const useUIStore = create<UIStore>((set) => ({
+  overlay: null,
+  toasts: [],
+  isCommandPaletteOpen: false,
+  openOverlay: (overlay) => set({ overlay, isCommandPaletteOpen: false }),
+  closeOverlay: () => set({ overlay: null }),
+  addToast: (toast) =>
+    set((state) => ({
+      toasts: [...state.toasts, { ...toast, id: toast.id ?? generateId('toast') }],
+    })),
+  removeToast: (id) =>
+    set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) })),
+  setCommandPaletteOpen: (open) => set({ isCommandPaletteOpen: open }),
+  toggleCommandPalette: () =>
+    set((state) => ({ isCommandPaletteOpen: !state.isCommandPaletteOpen })),
+}));
 
 // ============================================================================
 // Conversations Store
@@ -101,7 +77,13 @@ interface ConversationsStore {
   error: string | null;
   createConversation: (data?: Partial<Conversation>) => Conversation;
   setActiveConversation: (id: string | null) => void;
-  addMessage: (conversationId: string, content: string) => Message | null;
+  renameConversation: (id: string, title: string) => void;
+  addMessage: (
+    conversationId: string,
+    content: string,
+    role?: MessageRole,
+    metadata?: MessageMetadata
+  ) => Message | null;
 }
 
 export const useConversationsStore = create<ConversationsStore>()(
@@ -118,7 +100,7 @@ export const useConversationsStore = create<ConversationsStore>()(
           title: data.title ?? 'New conversation',
           projectId: data.projectId,
           agentId: data.agentId,
-          modelId: data.modelId ?? 'unconfigured',
+          modelId: data.modelId ?? 'friday-core-demo',
           providerId: data.providerId ?? 'custom',
           messages: data.messages ?? [],
           metadata: data.metadata ?? {
@@ -141,7 +123,13 @@ export const useConversationsStore = create<ConversationsStore>()(
         return conversation;
       },
       setActiveConversation: (id) => set({ activeConversationId: id }),
-      addMessage: (conversationId, content) => {
+      renameConversation: (id, title) =>
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id ? { ...conversation, title, updatedAt: new Date() } : conversation
+          ),
+        })),
+      addMessage: (conversationId, content, role = 'user', metadata = {}) => {
         const conversation = get().conversations.find((item) => item.id === conversationId);
         if (!conversation) return null;
 
@@ -149,9 +137,9 @@ export const useConversationsStore = create<ConversationsStore>()(
         const message: Message = {
           id: generateId('message'),
           conversationId,
-          role: 'user',
+          role,
           content: { type: 'text', text: content },
-          metadata: {},
+          metadata,
           createdAt: now,
         };
 
@@ -368,6 +356,8 @@ export const useTasksStore = create<TasksStore>()(
 interface SystemStore {
   status: SystemStatus;
   connections: ConnectionStatus[];
+  setStatus: (status: Partial<SystemStatus>) => void;
+  setConnections: (connections: ConnectionStatus[]) => void;
 }
 
 const initialSystemStatus: SystemStatus = {
@@ -378,7 +368,7 @@ const initialSystemStatus: SystemStatus = {
   diskTotal: 512 * 1024 * 1024 * 1024,
   networkStatus: 'online',
   uptime: 0,
-  version: '0.1.0',
+  version: '0.2.0',
   tauriVersion: '2',
   platform: typeof navigator !== 'undefined' ? navigator.platform : 'unknown',
   arch: 'unknown',
@@ -386,10 +376,128 @@ const initialSystemStatus: SystemStatus = {
 
 export const useSystemStore = create<SystemStore>()(
   persist(
-    () => ({
+    (set) => ({
       status: initialSystemStatus,
       connections: [] as ConnectionStatus[],
+      setStatus: (status) =>
+        set((state) => ({ status: { ...state.status, ...status } })),
+      setConnections: (connections) => set({ connections }),
     }),
-    { name: 'friday_system', storage: createStorage() }
+    {
+      name: 'friday_system',
+      storage: createStorage(),
+      partialize: (state) => ({ status: state.status }),
+    }
+  )
+);
+
+// ============================================================================
+// FRIDAY Assistant Store
+// ============================================================================
+
+export const DEFAULT_FRIDAY_SETTINGS: FridaySettings = {
+  addressAs: 'sir',
+  userName: '',
+  voiceEnabled: true,
+  autoSpeak: true,
+  voiceRate: 0.94,
+  voicePitch: 1,
+  voiceId: null,
+  soundEffects: true,
+  requireConfirmation: true,
+  demoMode: true,
+};
+
+interface AssistantStore {
+  settings: FridaySettings;
+  mood: FridayMood;
+  statusText: string;
+  isListening: boolean;
+  isSpeaking: boolean;
+  audioLevel: number;
+  transcript: string;
+  pendingAutomation: PendingAutomation | null;
+  automationLog: AutomationLogEntry[];
+  lastReply: string | null;
+  updateSettings: (settings: Partial<FridaySettings>) => void;
+  resetSettings: () => void;
+  setMood: (mood: FridayMood) => void;
+  setStatusText: (statusText: string) => void;
+  setListening: (isListening: boolean) => void;
+  setSpeaking: (isSpeaking: boolean) => void;
+  setAudioLevel: (audioLevel: number) => void;
+  setTranscript: (transcript: string) => void;
+  requestAutomation: (pending: PendingAutomation) => void;
+  clearPendingAutomation: () => void;
+  addAutomationLog: (entry: AutomationLogEntry) => void;
+  updateAutomationLog: (id: string, update: Partial<AutomationLogEntry>) => void;
+  clearAutomationLog: () => void;
+  setLastReply: (lastReply: string | null) => void;
+}
+
+export const useAssistantStore = create<AssistantStore>()(
+  persist(
+    (set) => ({
+      settings: DEFAULT_FRIDAY_SETTINGS,
+      mood: 'idle',
+      statusText: 'Online',
+      isListening: false,
+      isSpeaking: false,
+      audioLevel: 0,
+      transcript: '',
+      pendingAutomation: null,
+      automationLog: [],
+      lastReply: null,
+      updateSettings: (settings) =>
+        set((state) => ({ settings: { ...state.settings, ...settings } })),
+      resetSettings: () => set({ settings: DEFAULT_FRIDAY_SETTINGS }),
+      setMood: (mood) => set({ mood }),
+      setStatusText: (statusText) => set({ statusText }),
+      setListening: (isListening) => set({ isListening }),
+      setSpeaking: (isSpeaking) => set({ isSpeaking }),
+      setAudioLevel: (audioLevel) => set({ audioLevel }),
+      setTranscript: (transcript) => set({ transcript }),
+      requestAutomation: (pendingAutomation) => set({ pendingAutomation }),
+      clearPendingAutomation: () => set({ pendingAutomation: null }),
+      addAutomationLog: (entry) =>
+        set((state) => ({ automationLog: [entry, ...state.automationLog].slice(0, 100) })),
+      updateAutomationLog: (id, update) =>
+        set((state) => ({
+          automationLog: state.automationLog.map((entry) =>
+            entry.id === id ? { ...entry, ...update } : entry
+          ),
+        })),
+      clearAutomationLog: () => set({ automationLog: [] }),
+      setLastReply: (lastReply) => set({ lastReply }),
+    }),
+    {
+      name: 'friday_assistant',
+      storage: createStorage(),
+      version: 2,
+      migrate: (persistedState, version) => {
+        const state = persistedState as Partial<AssistantStore> | undefined;
+        if (!state?.settings) return state as AssistantStore;
+
+        // Phase 2 shipped a lower, more masculine pitch. Only upgrade untouched
+        // legacy defaults so a user's deliberate tuning is preserved.
+        const isLegacyDefault =
+          state.settings.voicePitch === 0.85 && state.settings.voiceRate === 0.95;
+
+        return {
+          ...state,
+          settings: {
+            ...DEFAULT_FRIDAY_SETTINGS,
+            ...state.settings,
+            ...(version < 2 && isLegacyDefault
+              ? { voicePitch: DEFAULT_FRIDAY_SETTINGS.voicePitch, voiceRate: DEFAULT_FRIDAY_SETTINGS.voiceRate }
+              : {}),
+          },
+        } as AssistantStore;
+      },
+      partialize: (state) => ({
+        settings: state.settings,
+        automationLog: state.automationLog,
+      }),
+    }
   )
 );

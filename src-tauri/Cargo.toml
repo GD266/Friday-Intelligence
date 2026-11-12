@@ -1,7 +1,7 @@
 [package]
 name = "friday-intelligence"
-version = "0.1.0"
-description = "FRIDAY Intelligence desktop workspace"
+version = "0.2.0"
+description = "FRIDAY Intelligence desktop assistant"
 authors = ["FRIDAY Intelligence"]
 edition = "2021"
 
@@ -11,5 +11,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-tts = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = "0.40"
+enigo = "0.6"
+robius-speech = "0.3"
