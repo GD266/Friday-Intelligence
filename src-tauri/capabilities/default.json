@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Default capability for the FRIDAY Intelligence main window",
-  "windows": ["main"],
-  "permissions": ["core:default", "opener:default", "tts:default"]
-}
