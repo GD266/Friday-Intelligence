@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "friday"
+version = "0.1.0"
+description = "FRIDAY 2.0 — Personal AI Assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "FRIDAY Team", email = "team@friday.ai"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment",
+]
+dependencies = [
+    "pyside6>=6.3.1",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.5.0",
+    "keyring>=23.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+friday = "friday.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/friday"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests/"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "asyncio",
+    "integration",
+    "system",
+    "slow",
+    "security",
+    "performance",
+]

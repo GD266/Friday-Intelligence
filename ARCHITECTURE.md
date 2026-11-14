@@ -1,0 +1,98 @@
+# FRIDAY 2.0 — System Architecture
+
+## Overview
+
+FRIDAY 2.0 is designed as a modular, event-driven architecture with clear separation of concerns. The system consists of 9 core components that communicate through well-defined interfaces, enabling maintainability, testability, and scalability.
+
+## System Architecture
+
+### Core Architecture Pattern
+
+The system follows a **Microservices with Core Data Layer** pattern:
+
+1. **UI**: PySide6-based desktop interface
+2. **Core**: Event-driven core service with asyncio
+3. **Gateway**: OpenAI-compatible AI provider gateway
+4. **Memory**: SQLite-based persistence with FTS5 search
+5. **Voice**: Speech recognition and synthesis modules
+6. **Tools**: Tool runtime and execution engine
+7. **Security**: Credential management and access control
+8. **Config**: Configuration management with Pydantic
+9. **Integration**: Windows automation, file/web intelligence, reminders
+
+This architecture ensures:
+- **Modularity**: Each component is independent and can be developed/tested separately
+- **Testability**: Each component can be unit tested in isolation
+- **Maintainability**: Clear boundaries and single responsibilities
+- **Scalability**: Performance can be optimized by scaling specific components
+
+### Data Flow Architecture
+
+The system operates as an event-driven architecture with the following data flow:
+
+1. **User Input**: Text or voice input captured through Desktop or Voice modules
+2. **Intent Processing**: Core service processes input and determines intent
+3. **Gateway Processing**: AI gateway generates responses using OpenAI-compatible provider
+4. **Memory Integration**: Memory system provides context and conversation history
+5. **Tool Execution**: Tools and Windows automation handle system operations
+6. **Output**: Results delivered through Desktop or Voice modules
+
+### Component Interfaces
+
+Each component exposes well-defined interfaces for communication:
+
+#### Core Service Interface
+```python
+class CoreServiceInterface:
+    async def process_user_input(self, input_data: UserInput) -> ProcessingResult:
+        pass
+    
+    async def execute_tool(self, tool_spec: ToolSpecification) -> ToolResult:
+        pass
+    
+    async def get_memory_context(self, query: str) -> MemoryContext:
+        pass
+```
+
+#### Gateway Interface
+```python
+class GatewayInterface:
+    async def generate_response(self, prompt: str, context: Dict) -> str:
+        pass
+    
+    async def is_available(self) -> bool:
+        pass
+```
+
+#### Memory System Interface
+```python
+class MemorySystemInterface:
+    def store_conversation(self, conversation: ConversationData) -> None:
+        pass
+    
+    def retrieve_context(self, query: str) -> MemoryContext:
+        pass
+    
+    def get_conversation_history(self, conversation_id: str) -> List[Message]:
+        pass
+```
+
+#### Voice Pipeline Interface
+```python
+class VoicePipelineInterface:
+    async def synthesize_speech(self, text: str) -> str:
+        pass
+    
+    async def recognize_speech(self, audio_data: str) -> str:
+        pass
+```
+
+#### Windows Automation Interface
+```python
+class WindowsAutomationInterface:
+    async def execute_action(self, action_spec: AutomationAction) -> AutomationResult:
+        pass
+    
+    async def capture_screen(self, region: Optional[Rect] = None) -> ScreenshotData:
+        pass
+```
