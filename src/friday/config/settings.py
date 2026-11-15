@@ -24,13 +24,16 @@ class CoreSettings(BaseModel):
     max_queue_size: int = 100
 
 
-class GatewaySettings(BaseModel):
-    """AI Gateway settings."""
+class ProviderSettings(BaseModel):
+    """OpenAI-compatible AI provider settings."""
 
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o-mini"
-    timeout: float = 30.0
-    max_retries: int = 3
+    base_url: str = "https://integrate.api.nvidia.com/v1"
+    model: str = ""
+    connect_timeout_seconds: float = 10.0
+    read_timeout_seconds: float = 90.0
+    system_prompt: str = (
+        "You are FRIDAY, a concise, helpful personal assistant."
+    )
 
 
 class MemorySettings(BaseModel):
@@ -54,7 +57,7 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     core: CoreSettings = Field(default_factory=CoreSettings)
-    gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+    provider: ProviderSettings = Field(default_factory=ProviderSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     ui: UISettings = Field(default_factory=UISettings)
 
@@ -84,11 +87,12 @@ debug = false
 ping_timeout = 5.0
 max_queue_size = 100
 
-[gateway]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-timeout = 30.0
-max_retries = 3
+[provider]
+base_url = "https://integrate.api.nvidia.com/v1"
+model = ""
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 90.0
+system_prompt = "You are FRIDAY, a concise, helpful personal assistant."
 
 [memory]
 db_path = ""
@@ -137,7 +141,8 @@ def load_settings() -> Settings:
         if not _get_valid_toml(content):
             raise ValueError(
                 f"Invalid TOML syntax in {config_path}. "
-                "Please check the configuration file format."
+                "Please check the configuration file format. "
+                "Fix the field, or rename/delete this file to regenerate defaults."
             )
         # Parse TOML
         data = tomllib.loads(content)
@@ -151,8 +156,10 @@ def load_settings() -> Settings:
             msg = error["msg"]
             errors.append(f"{field}: {msg}")
         raise ValueError(
-            f"Invalid configuration in {config_path}:\n" + "\n".join(errors)
-        )
+            f"Invalid configuration in {config_path}:\n"
+            + "\n".join(errors)
+            + "\nFix the field, or rename/delete this file to regenerate defaults."
+        ) from e
     except ValueError:
         raise
     except Exception as e:
@@ -169,10 +176,17 @@ def _apply_env_overrides(data: dict) -> dict:
         "FRIDAY_APP__DEBUG": ("app", "debug"),
         "FRIDAY_CORE__PING_TIMEOUT": ("core", "ping_timeout"),
         "FRIDAY_CORE__MAX_QUEUE_SIZE": ("core", "max_queue_size"),
-        "FRIDAY_GATEWAY__BASE_URL": ("gateway", "base_url"),
-        "FRIDAY_GATEWAY__MODEL": ("gateway", "model"),
-        "FRIDAY_GATEWAY__TIMEOUT": ("gateway", "timeout"),
-        "FRIDAY_GATEWAY__MAX_RETRIES": ("gateway", "max_retries"),
+        "FRIDAY_PROVIDER__BASE_URL": ("provider", "base_url"),
+        "FRIDAY_PROVIDER__MODEL": ("provider", "model"),
+        "FRIDAY_PROVIDER__CONNECT_TIMEOUT_SECONDS": (
+            "provider",
+            "connect_timeout_seconds",
+        ),
+        "FRIDAY_PROVIDER__READ_TIMEOUT_SECONDS": (
+            "provider",
+            "read_timeout_seconds",
+        ),
+        "FRIDAY_PROVIDER__SYSTEM_PROMPT": ("provider", "system_prompt"),
         "FRIDAY_MEMORY__DB_PATH": ("memory", "db_path"),
         "FRIDAY_MEMORY__MAX_CONVERSATIONS": ("memory", "max_conversations"),
         "FRIDAY_MEMORY__MAX_MESSAGES_PER_CONVERSATION": (
@@ -191,10 +205,21 @@ def _apply_env_overrides(data: dict) -> dict:
             # Convert value to appropriate type
             if key in ("debug",):
                 value = value.lower() in ("true", "1", "yes")
-            elif key in ("ping_timeout", "timeout", "max_retries", "max_queue_size",
-                         "max_conversations", "max_messages_per_conversation",
-                         "window_width", "window_height"):
-                is_float = key in ("ping_timeout", "timeout")
+            elif key in (
+                "ping_timeout",
+                "connect_timeout_seconds",
+                "read_timeout_seconds",
+                "max_queue_size",
+                "max_conversations",
+                "max_messages_per_conversation",
+                "window_width",
+                "window_height",
+            ):
+                is_float = key in (
+                    "ping_timeout",
+                    "connect_timeout_seconds",
+                    "read_timeout_seconds",
+                )
                 value = float(value) if is_float else int(value)
 
             if section not in result:

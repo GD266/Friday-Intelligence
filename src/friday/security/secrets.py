@@ -5,6 +5,9 @@ from typing import Optional
 import keyring
 from keyring.errors import KeyringError
 
+# Keyring entry name used for the OpenAI-compatible provider API key.
+PROVIDER_API_KEY = "provider_api_key"
+
 
 class SecretManager:
     """Thin wrapper over keyring for secret management.

@@ -82,8 +82,33 @@ The FRIDAY 2.0 implementation follows a phased approach to ensure systematic dev
 ### Testing Approach
 - **Unit Tests**: tests/unit/
 - **System Tests**: tests/integration/
-- **No AI Code**: Nothing simulates it yet
+- **Test Doubles**: Scripted providers live only in tests/
 - **No Real External Access**: Do NOT hit network or real Credential Manager in pytest
+
+## Phase 1: AI Gateway + Streaming Chat
+
+### Status
+
+Implemented.
+
+### Deliverables
+
+- `gateway/` OpenAI-compatible streaming provider (manual SSE parsing, retries only
+  for connection errors and 5xx before the first token, typed errors, reasoning
+  filtering, clean cancellation)
+- `provider` config section in `%APPDATA%\Friday\config.toml`
+- `CoreService.chat_send` / `cancel_chat` / `clear_chat` with in-memory history and
+  Qt streaming signals
+- Chat UI: transcript, streaming tokens, Stop / New chat, typed error display
+- Manual scripts: `scripts/set_key.py`, `scripts/list_models.py`,
+  `scripts/live_smoke.py`
+
+### Acceptance Criteria
+
+- `pip install -e ".[dev]"` installs PySide6-Essentials only (no WebEngine/Pdf)
+- `ruff check .` clean and `pytest -v` green, with no network in tests
+- `python -m friday` opens the chat UI; a missing model/key shows `NotConfigured`
+  with remediation steps
 
 ### Security Model
 - **Secure by Design**: No plaintext credential storage
@@ -113,7 +138,7 @@ The FRIDAY 2.0 implementation follows a phased approach to ensure systematic dev
 
 ### Testing Requirements
 - **Acceptance Criteria**: All tests pass
-- **No AI**: No AI/provider code exists yet
+- **No Fake AI**: Real provider calls only; scripted providers live in tests/
 - **No Demo**: No fake AI responses or simulations
 - **Real Failures**: Real errors shown, no silent fallbacks
 
@@ -133,8 +158,9 @@ The FRIDAY 2.0 implementation follows a phased approach to ensure systematic dev
 - **Development**: `pip install -e .[dev]` works in a fresh venv
 - **Code Quality**: `ruff check .` passes with no errors
 - **Testing**: `pytest -v` passes
-- **Functional**: `python -m friday` opens a window; Ping core shows pong; closing the window ends process
-- **Security**: No AI/provider code exists yet
+- **Functional**: `python -m friday` opens the chat window; streaming replies appear
+  live; closing the window ends the process
+- **Security**: The API key is stored in Credential Manager and never logged
 - **Testing**: No real external access in pytest
 
 ## References

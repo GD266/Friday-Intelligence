@@ -63,12 +63,13 @@ class TestCoreService:
         assert "already running" in caplog.text
         core.stop()
 
-    def test_stop_when_not_running(self, caplog):
-        """Test stopping when not running logs warning."""
+    def test_stop_when_not_running_is_silent(self, caplog):
+        """Test stopping when not running logs only at DEBUG level."""
         import logging
-        caplog.set_level(logging.WARNING)
+        caplog.set_level(logging.DEBUG)
 
         core = CoreService()
         core.stop()
 
-        assert "not running" in caplog.text
+        assert "already stopped" in caplog.text
+        assert "WARNING" not in caplog.text

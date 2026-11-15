@@ -1,0 +1,19 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# Secrets / local configuration
+.env

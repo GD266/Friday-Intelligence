@@ -20,6 +20,8 @@ class RedactionFilter(logging.Filter):
         (re.compile(r"Bearer\s+[a-zA-Z0-9-_=]+"), "Bearer ***REDACTED***"),
         # gsk_... keys (Groq)
         (re.compile(r"gsk_[a-zA-Z0-9]{50,}"), "gsk_***REDACTED***"),
+        # NVIDIA API keys (nvapi-...)
+        (re.compile(r"nvapi-[a-zA-Z0-9-_]{20,}"), "nvapi-***REDACTED***"),
         # OpenAI API keys (sk-... 48 chars)
         (re.compile(r"sk-[a-zA-Z0-9]{48}"), "sk-***REDACTED***"),
         # Generic sk-... keys (fallback)
@@ -37,9 +39,15 @@ class RedactionFilter(logging.Filter):
         return True
 
     def _redact(self, text: str) -> str:
-        for pattern, replacement in self.PATTERNS:
-            text = pattern.sub(replacement, text)
-        return text
+        return redact_text(text)
+
+
+def redact_text(text: str) -> str:
+    """Return *text* with known API key formats masked."""
+    for pattern, replacement in RedactionFilter.PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 
 def get_log_dir() -> Path:

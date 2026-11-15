@@ -56,13 +56,20 @@ class CoreServiceInterface:
 
 #### Gateway Interface
 ```python
-class GatewayInterface:
-    async def generate_response(self, prompt: str, context: Dict) -> str:
-        pass
-    
-    async def is_available(self) -> bool:
-        pass
+class Provider(ABC):
+    @abstractmethod
+    def stream_chat(
+        self, messages: Sequence[Message]
+    ) -> AsyncIterator[StreamEvent]:
+        ...
 ```
+
+The OpenAI-compatible provider streams Server-Sent Events from
+`POST {base_url}/chat/completions` and maps every HTTP/transport failure to a
+typed error (`NotConfigured`, `AuthError`, `NotFound`, `RateLimited`,
+`ServerError`, `NetworkError`, `TimeoutError`, `MalformedResponse`,
+`Cancelled`). Reasoning channels (`delta.reasoning_content` and
+`<think...>...</think...>` text) are excluded from the answer.
 
 #### Memory System Interface
 ```python
