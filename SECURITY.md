@@ -260,6 +260,51 @@ Security is a fundamental requirement for FRIDAY 2.0. This document outlines the
 - Optional automatic approval for trusted operations
 - Audit trail of all confirmations
 
+#### Tool Runtime Security (Phase 4)
+
+**Tool Allowlist Enforcement**: The `open_app` tool launches only executables from a
+configuration-managed allowlist (`tools.allowed_apps`). The model supplies a
+friendly name; the executable path and arguments are never model-controlled.
+Launch uses `subprocess.Popen([exe], shell=False)` with no shell interpretation.
+
+**Permission Tiers**: Each tool declares a permission level:
+- `SAFE` (e.g., `get_time`): read-only, deterministic, no side effects; auto-allowed.
+- `SENSITIVE` (e.g., `open_app`, `read_clipboard`): side effects or data exposure; allowed by default but audited; `read_clipboard` additionally requires explicit confirmation.
+- `DESTRUCTIVE`: irreversible changes; always requires confirmation.
+
+**Taint Tracking**: After any tool with `returns_untrusted=True` (currently
+`read_clipboard`) executes in a turn, subsequent non-pure tool calls require
+confirmation even if they would normally auto-allow. This prevents
+confused-deputy chains where clipboard data influences later actions.
+
+**Confirmation UI**: Modal dialog with tool name, plain-English description,
+redacted arguments, Approve/Deny buttons (Deny default). No "always allow" in
+Phase 4. Confirmation timeout (`tools.confirm_timeout_seconds`, default 60s)
+enforced by core; timeout = deny. Stop/Cancel or window close denies pending
+confirmations.
+
+**Argument/Result Redaction**: All tool arguments are redacted via the central
+secret detector before audit logging and UI display. Tool results are truncated
+to `tools.max_result_chars` (default 2000) and secret-redacted before reaching
+the model. The audit table stores only redacted arguments, status, error kind,
+and result size — never raw clipboard text or full results.
+
+**Audit Trail**: Migration 3 adds `tool_audit(id, ts UTC, conversation_id
+nullable, tool, args_json redacted, permission, decision, status, error_kind,
+duration_ms)`. One log line per call with same redaction. Conversation deletion
+sets `conversation_id` to NULL (cascade null), preserving audit history.
+
+**Provider Tool Schema**: Only registered tools (exactly three in Phase 4) are
+sent to the model via OpenAI `tools` format. The model cannot invoke arbitrary
+functions.
+
+**Disabled Tools**: `tools.enabled = false` sends no tool schema and executes
+no tool code; the agent loop is bypassed entirely.
+
+**Test Isolation**: All tests use fake providers, fake UI bridges, and
+in-memory databases; no real subprocess launch, clipboard access, or network
+calls occur during test runs.
+
 ## Security Testing
 
 ### Security Testing Strategy

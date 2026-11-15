@@ -16,9 +16,11 @@ from friday.gateway.base import Provider
 from friday.gateway.types import (
     EVENT_DONE,
     EVENT_TOKEN,
+    EVENT_TOOL_CALLS,
     ChatRequest,
     Message,
     StreamEvent,
+    ToolCall,
     Usage,
 )
 from friday.security.secrets import PROVIDER_API_KEY, SecretManager
@@ -137,7 +139,10 @@ class OpenAICompatProvider(Provider):
             await self._client.aclose()
 
     async def stream_chat(
-        self, messages: Sequence[Message]
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, object]] = (),
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream a chat completion from the configured provider."""
         api_key = self._require_configuration()
@@ -145,6 +150,8 @@ class OpenAICompatProvider(Provider):
             model=self._settings.model.strip(),
             messages=tuple(messages),
             stream=True,
+            tools=tuple(tools),
+            tool_choice=tool_choice,
         )
         url = f"{self._base_url}/chat/completions"
         attempt = 0
@@ -245,6 +252,7 @@ class OpenAICompatProvider(Provider):
     ) -> AsyncIterator[StreamEvent]:
         usage: Usage | None = None
         think_filter = _ThinkTagFilter()
+        tool_fragments: dict[int, dict[str, str]] = {}
 
         async for raw_line in response.aiter_lines():
             line = raw_line.strip("\r")
@@ -262,6 +270,11 @@ class OpenAICompatProvider(Provider):
                 tail = think_filter.flush()
                 if tail:
                     yield StreamEvent(EVENT_TOKEN, tail)
+                calls = self._finalize_tool_calls(tool_fragments)
+                if calls:
+                    yield StreamEvent(
+                        EVENT_TOOL_CALLS, tool_calls=calls
+                    )
                 yield StreamEvent(EVENT_DONE, usage=usage)
                 return
 
@@ -307,6 +320,7 @@ class OpenAICompatProvider(Provider):
                 delta = choice.get("delta")
                 if not isinstance(delta, dict):
                     continue
+                self._accumulate_tool_calls(delta, tool_fragments)
                 content = delta.get("content")
                 if content is None:
                     # Missing deltas and reasoning_content need no handling:
@@ -323,7 +337,89 @@ class OpenAICompatProvider(Provider):
         tail = think_filter.flush()
         if tail:
             yield StreamEvent(EVENT_TOKEN, tail)
+        calls = self._finalize_tool_calls(tool_fragments)
+        if calls:
+            yield StreamEvent(EVENT_TOOL_CALLS, tool_calls=calls)
         yield StreamEvent(EVENT_DONE, usage=usage)
+
+    @staticmethod
+    def _accumulate_tool_calls(
+        delta: dict[str, Any],
+        fragments: dict[int, dict[str, str]],
+    ) -> None:
+        """Accumulate streamed tool-call fragments by index."""
+        raw_calls = delta.get("tool_calls")
+        if raw_calls is None:
+            return
+        if not isinstance(raw_calls, list):
+            raise errors.MalformedResponse(
+                "Provider sent an invalid tool_calls field."
+            )
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                raise errors.MalformedResponse(
+                    "Provider sent a malformed tool call."
+                )
+            index = raw_call.get("index")
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+            ):
+                raise errors.MalformedResponse(
+                    "Provider sent a tool call without a valid index."
+                )
+            fragment = fragments.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            call_id = raw_call.get("id")
+            if call_id is not None:
+                if not isinstance(call_id, str):
+                    raise errors.MalformedResponse(
+                        "Provider sent a non-text tool call id."
+                    )
+                fragment["id"] += call_id
+
+            function = raw_call.get("function")
+            if function is None:
+                continue
+            if not isinstance(function, dict):
+                raise errors.MalformedResponse(
+                    "Provider sent a malformed tool function."
+                )
+            name = function.get("name")
+            if name is not None:
+                if not isinstance(name, str):
+                    raise errors.MalformedResponse(
+                        "Provider sent a non-text tool name."
+                    )
+                fragment["name"] += name
+            arguments = function.get("arguments")
+            if arguments is not None:
+                if not isinstance(arguments, str):
+                    raise errors.MalformedResponse(
+                        "Provider sent non-text tool arguments."
+                    )
+                fragment["arguments"] += arguments
+
+    @staticmethod
+    def _finalize_tool_calls(
+        fragments: dict[int, dict[str, str]]
+    ) -> tuple[ToolCall, ...]:
+        """Return assembled calls in index order, dropping empty fragments."""
+        calls: list[ToolCall] = []
+        for index in sorted(fragments):
+            fragment = fragments[index]
+            if not fragment["name"]:
+                continue
+            calls.append(
+                ToolCall(
+                    id=fragment["id"],
+                    name=fragment["name"],
+                    arguments=fragment["arguments"],
+                )
+            )
+        return tuple(calls)
 
     @staticmethod
     def _format_error_payload(payload: Any) -> str:

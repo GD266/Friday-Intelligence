@@ -7,6 +7,7 @@ import pytest
 import friday.memory.db as db_module
 from friday.memory.db import (
     MIGRATION_1,
+    MIGRATION_2,
     SCHEMA_VERSION,
     Database,
     FTS5UnavailableError,
@@ -93,6 +94,54 @@ def test_upgrade_from_v1_preserves_data_and_backfills_complete_messages(
             "messages_fts_ad",
             "messages_fts_au",
         } <= triggers
+    finally:
+        database.close()
+
+
+def test_upgrade_from_v2_adds_tool_audit_and_preserves_data(tmp_path) -> None:
+    path = tmp_path / "friday.db"
+    connection = sqlite3.connect(path)
+    try:
+        for statement in MIGRATION_1 + MIGRATION_2:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) "
+            "VALUES (1, 'V2 chat', '2026-02-01T00:00:00+00:00', "
+            "'2026-02-01T00:00:00+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO messages "
+            "(id, conversation_id, role, content, status, created_at) "
+            "VALUES (1, 1, 'user', 'v2 question', 'complete', "
+            "'2026-02-01T00:00:00+00:00')"
+        )
+        connection.execute("PRAGMA user_version = 2")
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = Database(path)
+    try:
+        connection = database.connection
+        assert connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conversations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT content FROM messages WHERE id = 1"
+        ).fetchone()[0] == "v2 question"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM tool_audit"
+        ).fetchone()[0] == 0
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        assert "idx_tool_audit_conversation_id" in indexes
     finally:
         database.close()
 

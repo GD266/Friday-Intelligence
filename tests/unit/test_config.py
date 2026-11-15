@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from friday.config.settings import (
+    ToolsSettings,
     ensure_config_exists,
     load_settings,
 )
@@ -23,6 +24,11 @@ class TestConfigDefaults:
             content = config_path.read_text()
             assert "FRIDAY 2.0" in content
             assert "base_url" in content
+            assert "[tools]" in content
+            assert "max_iterations = 5" in content
+            assert "max_calls_per_turn = 8" in content
+            assert "[tools.allowed_apps]" in content
+            assert 'notepad = "notepad.exe"' in content
 
     def test_load_default_settings(self, monkeypatch):
         """Test loading default settings."""
@@ -42,6 +48,17 @@ class TestConfigDefaults:
             assert settings.memory.enabled is True
             assert settings.memory.fact_char_budget == 2000
             assert settings.memory.max_facts_in_prompt == 20
+            assert settings.tools.enabled is True
+            assert settings.tools.max_iterations == 5
+            assert settings.tools.max_calls_per_turn == 8
+            assert settings.tools.tool_timeout_seconds == 10.0
+            assert settings.tools.confirm_timeout_seconds == 60.0
+            assert settings.tools.max_result_chars == 2000
+            assert settings.tools.allowed_apps == {
+                "notepad": "notepad.exe",
+                "calculator": "calc.exe",
+                "paint": "mspaint.exe",
+            }
 
     def test_invalid_config_rejected(self, monkeypatch):
         """Test that invalid config raises clear error."""
@@ -76,6 +93,39 @@ class TestConfigDefaults:
             or "connect_timeout_seconds" in str(exc_info.value)
         )
 
+    def test_invalid_tools_values_rejected(self, monkeypatch):
+        """Test that unsafe or nonsensical tool settings are rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("APPDATA", tmpdir)
+            config_path = Path(tmpdir) / "Friday" / "config.toml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                "[tools]\nmax_iterations = 0\n",
+                encoding="utf-8",
+            )
+
+            with pytest.raises(ValueError) as exc_info:
+                load_settings()
+            assert "tools.max_iterations" in str(exc_info.value)
+
+    def test_empty_allowed_apps_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at least one app"):
+            ToolsSettings(allowed_apps={})
+
+    def test_allowed_apps_reject_empty_executable(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            ToolsSettings(allowed_apps={"notepad": "   "})
+
+    def test_allowed_apps_reject_null_character(self) -> None:
+        with pytest.raises(ValueError, match="null character"):
+            ToolsSettings(allowed_apps={"notepad": "note\x00pad.exe"})
+
+    def test_allowed_apps_names_are_trimmed(self) -> None:
+        settings = ToolsSettings(
+            allowed_apps={" notepad ": " notepad.exe "}
+        )
+        assert settings.allowed_apps == {"notepad": "notepad.exe"}
+
     def test_env_override(self, monkeypatch):
         """Test environment variable override."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -87,6 +137,16 @@ class TestConfigDefaults:
             monkeypatch.setenv("FRIDAY_MEMORY__ENABLED", "false")
             monkeypatch.setenv("FRIDAY_MEMORY__FACT_CHAR_BUDGET", "1500")
             monkeypatch.setenv("FRIDAY_MEMORY__MAX_FACTS_IN_PROMPT", "7")
+            monkeypatch.setenv("FRIDAY_TOOLS__ENABLED", "false")
+            monkeypatch.setenv("FRIDAY_TOOLS__MAX_ITERATIONS", "3")
+            monkeypatch.setenv("FRIDAY_TOOLS__MAX_CALLS_PER_TURN", "4")
+            monkeypatch.setenv(
+                "FRIDAY_TOOLS__TOOL_TIMEOUT_SECONDS", "2.5"
+            )
+            monkeypatch.setenv(
+                "FRIDAY_TOOLS__CONFIRM_TIMEOUT_SECONDS", "7.5"
+            )
+            monkeypatch.setenv("FRIDAY_TOOLS__MAX_RESULT_CHARS", "500")
             settings = load_settings()
             assert settings.app.log_level == "DEBUG"
             assert settings.provider.model == "meta/llama-3.1-8b"
@@ -95,6 +155,12 @@ class TestConfigDefaults:
             assert settings.memory.enabled is False
             assert settings.memory.fact_char_budget == 1500
             assert settings.memory.max_facts_in_prompt == 7
+            assert settings.tools.enabled is False
+            assert settings.tools.max_iterations == 3
+            assert settings.tools.max_calls_per_turn == 4
+            assert settings.tools.tool_timeout_seconds == 2.5
+            assert settings.tools.confirm_timeout_seconds == 7.5
+            assert settings.tools.max_result_chars == 500
 
 
 class TestConfigFileCompatibility:

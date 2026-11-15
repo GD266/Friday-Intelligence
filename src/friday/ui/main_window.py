@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from friday.core.service import CoreService, parse_command
+from friday.core.ui_bridge import QtUIBridge
 from friday.memory.conversations import (
     STATUS_INCOMPLETE,
     Conversation,
@@ -38,7 +40,9 @@ from friday.memory.conversations import (
 )
 from friday.memory.facts import Fact
 from friday.memory.search import SearchResult
+from friday.ui.confirm_dialog import ConfirmDialog
 from friday.ui.memory_dialog import MemoryDialog
+from friday.ui.tools_dialog import ToolsDialog
 
 
 def _relative_time(timestamp: str) -> str:
@@ -92,7 +96,17 @@ class MainWindow(QMainWindow):
         self._search_active = False
         self._facts_list_pending = 0
         self._memory_dialog: MemoryDialog | None = None
+        self._tools_dialog: ToolsDialog | None = None
+        self._confirm_dialog: ConfirmDialog | None = None
+        self._tool_lines: list[tuple[str, int]] = []
         self._current_conversation_id = 0
+        self._ui_bridge = QtUIBridge(
+            self._core.signals.confirm_requested, self
+        )
+        self._core.set_ui_bridge(self._ui_bridge)
+        self._ui_bridge.clipboard_requested.connect(
+            self._on_clipboard_requested
+        )
         self._setup_ui()
         self._connect_signals()
 
@@ -162,6 +176,9 @@ class MainWindow(QMainWindow):
         self._memory_button = QPushButton("Memory")
         self._memory_button.clicked.connect(self._on_memory_clicked)
         status_row.addWidget(self._memory_button)
+        self._tools_button = QPushButton("Tools")
+        self._tools_button.clicked.connect(self._on_tools_clicked)
+        status_row.addWidget(self._tools_button)
         self._ping_button = QPushButton("Ping core")
         self._ping_button.clicked.connect(self._on_ping_clicked)
         status_row.addWidget(self._ping_button)
@@ -233,6 +250,11 @@ class MainWindow(QMainWindow):
         self._core.signals.facts_loaded.connect(self._on_facts_loaded)
         self._core.signals.memory_notice.connect(self._on_memory_notice)
         self._core.signals.search_results.connect(self._on_search_results)
+        self._core.signals.tool_started.connect(self._on_tool_started)
+        self._core.signals.tool_finished.connect(self._on_tool_finished)
+        self._core.signals.confirm_requested.connect(
+            self._on_confirm_requested
+        )
 
     # ------------------------------------------------------------------
     # Transcript helpers
@@ -274,6 +296,72 @@ class MainWindow(QMainWindow):
         if self._is_dark_theme():
             return QColor("#e6b450")
         return QColor("#8a6d00")
+
+    def _tool_color(self) -> QColor:
+        return self._palette_color(QPalette.ColorRole.Link)
+
+    def _append_tool_started(self, name: str, args_summary: str) -> None:
+        """Append a tool activity line and remember its cursor position."""
+        if self._assistant_open:
+            self._assistant_open = False
+            self._assistant_has_tokens = False
+        cursor = self._cursor_at_end()
+        self._start_block(cursor)
+        label = QTextCharFormat()
+        label.setForeground(self._tool_color())
+        label.setFontWeight(QFont.Weight.Bold)
+        cursor.insertText("Tool: ", label)
+        body = QTextCharFormat()
+        body.setForeground(self._tool_color())
+        cursor.insertText(f"{name}({args_summary})", body)
+        position = cursor.position()
+        self._commit(cursor)
+        self._tool_lines.append((name, position))
+
+    def _finish_tool_line(
+        self, name: str, status: str, summary: str
+    ) -> None:
+        """Insert the real status after the matching tool activity line."""
+        position = None
+        for index in range(len(self._tool_lines) - 1, -1, -1):
+            line_name, line_position = self._tool_lines[index]
+            if line_name == name:
+                position = line_position
+                self._tool_lines.pop(index)
+                break
+
+        if position is None:
+            cursor = self._cursor_at_end()
+            self._start_block(cursor)
+            status_format = QTextCharFormat()
+            status_format.setForeground(
+                self._error_color()
+                if status in ("error", "denied")
+                else self._tool_color()
+            )
+            status_format.setFontWeight(QFont.Weight.Bold)
+            cursor.insertText(
+                f"Tool: {name} -> {status}", status_format
+            )
+            if summary:
+                cursor.insertText(f": {summary}", self._body_format())
+            self._commit(cursor)
+            return
+
+        cursor = QTextCursor(self._transcript.document())
+        cursor.setPosition(position)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        status_format = QTextCharFormat()
+        status_format.setForeground(
+            self._error_color()
+            if status in ("error", "denied")
+            else self._tool_color()
+        )
+        status_format.setFontWeight(QFont.Weight.Bold)
+        cursor.insertText(f" -> {status}", status_format)
+        if summary:
+            cursor.insertText(f": {summary}", self._body_format())
+        self._commit(self._cursor_at_end())
 
     def _append_user(self, text: str) -> None:
         cursor = self._cursor_at_end()
@@ -415,16 +503,19 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _on_chat_error(self, kind: str, message: str) -> None:
+        self._close_confirm_dialog()
         if self._assistant_open and self._assistant_has_tokens:
             self._insert_marker(" [incomplete]", self._error_color())
         self._assistant_open = False
         self._assistant_has_tokens = False
+        self._tool_lines.clear()
         self._append_error(kind, message)
         self._set_streaming(False)
         self._output_label.setText(f"Request failed: {kind}")
 
     @Slot()
     def _on_chat_cancelled(self) -> None:
+        self._close_confirm_dialog()
         if self._assistant_open:
             marker = " [cancelled]"
             if not self._assistant_has_tokens:
@@ -432,8 +523,87 @@ class MainWindow(QMainWindow):
             self._insert_marker(marker, self._cancelled_color())
         self._assistant_open = False
         self._assistant_has_tokens = False
+        self._tool_lines.clear()
         self._set_streaming(False)
         self._output_label.setText("Reply cancelled")
+
+    # ------------------------------------------------------------------
+    # Tool slots
+    # ------------------------------------------------------------------
+    @Slot(str, str)
+    def _on_tool_started(self, name: str, args_summary: str) -> None:
+        self._append_tool_started(name, args_summary)
+        self._status_label.setText("Core: running | Running tool…")
+        self._output_label.setText("Running tool…")
+
+    @Slot(str, str, str)
+    def _on_tool_finished(
+        self, name: str, status: str, summary: str
+    ) -> None:
+        self._finish_tool_line(name, status, summary)
+        state = "Streaming..." if self._streaming else "Idle"
+        self._status_label.setText(f"Core: running | {state}")
+        detail = f": {summary}" if summary else ""
+        self._output_label.setText(f"Tool {name} -> {status}{detail}")
+
+    @Slot(str, str, str, str)
+    def _on_confirm_requested(
+        self,
+        request_id: str,
+        tool: str,
+        description: str,
+        args_summary: str,
+    ) -> None:
+        self._output_label.setText(f"Waiting for approval: {tool}")
+        dialog = ConfirmDialog(
+            tool, description, args_summary, self
+        )
+        self._confirm_dialog = dialog
+        try:
+            approved = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self._confirm_dialog = None
+            dialog.deleteLater()
+        self._core.confirm_response(request_id, approved)
+
+    @Slot(str)
+    def _on_clipboard_requested(self, request_id: str) -> None:
+        """Read the clipboard on the UI thread and resolve the bridge."""
+        text: str | None = None
+        try:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                mime_data = clipboard.mimeData()
+                if mime_data is not None and mime_data.hasText():
+                    text = clipboard.text()
+        except Exception:
+            text = None
+        self._ui_bridge.resolve_clipboard(request_id, text)
+
+    def _close_confirm_dialog(self) -> None:
+        dialog = self._confirm_dialog
+        if dialog is not None:
+            dialog.reject()
+
+    @Slot()
+    def _on_tools_clicked(self) -> None:
+        if not self._core.is_running:
+            self._append_error(
+                "CoreNotRunning", "Tools are unavailable while core is stopped."
+            )
+            return
+        dialog = ToolsDialog(self._core, self)
+        self._tools_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._tools_dialog = None
+            dialog.deleteLater()
+
+    @Slot()
+    def _on_tools_loaded(self, tools: list, rows: list) -> None:
+        if self._tools_dialog is not None:
+            self._tools_dialog.set_contents(tools, rows)
 
     # ------------------------------------------------------------------
     # Conversation slots
@@ -730,6 +900,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Core: stopped")
         self._ping_button.setEnabled(False)
         self._memory_button.setEnabled(False)
+        self._tools_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
@@ -739,13 +910,16 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Core: failed - {message}")
         self._ping_button.setEnabled(False)
         self._memory_button.setEnabled(False)
+        self._tools_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
         self._conversation_list.setEnabled(False)
 
     def closeEvent(self, event) -> None:
-        """Handle window close event."""
+        """Deny pending requests and stop the core on window close."""
+        self._close_confirm_dialog()
+        self._ui_bridge.shutdown()
         self._core.stop()
         event.accept()
 

@@ -13,7 +13,10 @@ class Provider(ABC):
 
     @abstractmethod
     def stream_chat(
-        self, messages: Sequence[Message]
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, object]] = (),
+        tool_choice: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the assistant reply for *messages*.
 

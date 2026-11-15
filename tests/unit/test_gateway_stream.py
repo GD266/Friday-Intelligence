@@ -223,6 +223,7 @@ async def test_usage_is_reported_on_done() -> None:
         (401, errors.AuthError),
         (403, errors.AuthError),
         (404, errors.NotFound),
+        (410, errors.ModelRetired),
         (500, errors.ServerError),
     ],
 )
@@ -238,6 +239,22 @@ async def test_http_status_maps_to_typed_error(
         await collect(provider)
 
     assert exc_info.value.status_code == status_code
+    await provider.aclose()
+
+
+async def test_410_model_retired_message() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, text="model retired")
+
+    provider = make_provider(handler)
+
+    with pytest.raises(errors.ModelRetired) as exc_info:
+        await collect(provider)
+
+    assert exc_info.value.status_code == 410
+    assert "retired" in str(exc_info.value).lower()
+    assert "list_models.py" in str(exc_info.value)
+    assert "config.toml" in str(exc_info.value)
     await provider.aclose()
 
 

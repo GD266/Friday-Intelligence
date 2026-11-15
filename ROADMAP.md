@@ -309,40 +309,67 @@ to Phase 3b. Phase 3 does not generate, store, or inject summaries.
 - [ ] All systems integrate seamlessly
 - [ ] Performance is acceptable for typical use cases
 
-## Phase 4: Windows Automation & Security (Weeks 13-16)
+## Phase 4: Tool Runtime (Safe, Audited, Bounded)
 
-### Objectives
+### Status
 
-- Implement controlled Windows automation
-- Enhance security model
-- Create operation confirmation system
-- Implement audit logging
-- Build access control mechanisms
+Implemented.
 
 ### Deliverables
 
-#### Week 13-14: Windows Automation
-- [ ] Implement Windows automation module with pywin32
-- [ ] Create action catalog and templates
-- [ ] Implement operation confirmation system
-- [ ] Create safe operation wrapper
-- [ ] Implement desktop interaction controls
-
-#### Week 15-16: Security Enhancement
-- [ ] Implement enhanced security controls
-- [ ] Create access control system
-- [ ] Implement comprehensive audit logging
-- [ ] Add security monitoring
-- [ ] Create security policy management
+- **Schema v3**: Migration 3 adds `tool_audit` table with cascade-null
+  `conversation_id`; audit index for recent lookups.
+- **tools/**: Base `Tool` class with Pydantic args, permission tiers
+  (`SAFE`/`SENSITIVE`/`DESTRUCTIVE`), `requires_confirmation`,
+  `returns_untrusted`, `pure` flags. Central `sanitize_result()` for
+  truncation and secret redaction.
+- **tools/registry.py**: `ToolRegistry` generates OpenAI `tools` JSON
+  schemas from Pydantic models; exactly three built-in tools.
+- **tools/permissions.py**: `TurnState` taint tracking; `decide()` returns
+  `ALLOW` or `CONFIRM` per tier/taint rules.
+- **tools/audit.py**: `ToolAuditRepository` writes redacted rows + one log
+  line per call; `recent(20)` for the Tools dialog.
+- **tools/builtin/**:
+  - `get_time(timezone?)` — SAFE, pure, IANA zone validation via `zoneinfo`.
+  - `open_app(name)` — SENSITIVE, enum from `tools.allowed_apps` config,
+    launches `subprocess.Popen([exe], shell=False)`.
+  - `read_clipboard()` — SENSITIVE, requires_confirmation, returns_untrusted,
+    reads on UI thread via bridge, truncates/redacts before model.
+- **gateway/types.py**: `ROLE_TOOL`, `EVENT_TOOL_CALLS`, `Message.tool_calls`,
+  `ChatRequest.tools`, `tool_choice="auto"`.
+- **gateway/openai_compat.py**: Streaming fragment assembly by index,
+  single `EVENT_TOOL_CALLS` emission at `[DONE]`/stream end, garbled
+  fragments discarded on mid-stream failure.
+- **core/service.py**: Bounded agent loop with `max_iterations` (5),
+  `max_calls_per_turn` (8), `tool_timeout_seconds` (10),
+  `confirm_timeout_seconds` (60). Unknown/invalid calls → error results;
+  two consecutive invalid → abort. Deny/timeout → denied tool result.
+  System prompt guidance injected only when provider accepts tools.
+  Persistence: user message + final assistant reply only.
+- **core/ui_bridge.py**: `QtUIBridge` with `confirm()` and
+  `read_clipboard_text()` via Qt signals/slots; `deny_pending()`,
+  `cancel_pending()`, `shutdown()`; thread-safe `loop.call_soon_threadsafe`.
+- **UI**: `ConfirmDialog` (modal, Deny default, no "always allow");
+  transcript tool lines ("Tool: name(args) -> status"); Tools dialog lists
+  registered tools + last 20 audit rows.
+- **Config**: `[tools]` section with `enabled`, `max_iterations`,
+  `max_calls_per_turn`, `tool_timeout_seconds`, `confirm_timeout_seconds`,
+  `max_result_chars`, `allowed_apps` (notepad/calculator/paint defaults).
+  Env overrides `FRIDAY_TOOLS__*`.
+- **Tests**: 239 passing; new test modules for registry, builtins,
+  permissions, audit, gateway tool streaming, core agent loop, UI tools,
+  UI bridge; no real subprocess/clipboard/network in tests.
+- **Manual script**: `scripts/tool_stream_smoke.py` exercises real
+  gateway streaming with registry schemas for 5 prompts.
 
 ### Acceptance Criteria
 
-- [ ] Windows automation is secure and controlled
-- [ ] All operations require appropriate confirmation
-- [ ] Security system prevents unauthorized access
-- [ ] Audit logs capture all relevant events
-- [ ] Security policies are enforceable
-- [ ] System withstands security tests
+- `pip install -e ".[dev]"` works; `tzdata` dependency added.
+- `ruff check .` clean.
+- `pytest -v` all 239 tests pass.
+- App starts on existing v2 database; migration 3 runs silently.
+- No tool executes without explicit confirmation where required.
+- Audit rows are redacted; no raw clipboard text stored.
 
 ## Phase 5: Integration, Testing & Deployment (Weeks 17-20)
 

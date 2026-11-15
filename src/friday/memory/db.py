@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 MIGRATION_1 = (
     """
@@ -120,9 +120,74 @@ MIGRATION_2 = (
     """,
 )
 
+MIGRATION_3 = (
+    """
+    CREATE TABLE tool_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        conversation_id INTEGER
+            REFERENCES conversations(id) ON DELETE SET NULL,
+        tool TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        decision TEXT NOT NULL
+            CHECK (decision IN ('auto', 'approved', 'denied', 'timeout')),
+        status TEXT NOT NULL
+            CHECK (status IN ('ok', 'error', 'denied', 'skipped')),
+        error_kind TEXT,
+        duration_ms INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_tool_audit_conversation_id
+        ON tool_audit(conversation_id)
+    """,
+)
+
+MIGRATION_4 = (
+    """
+    ALTER TABLE tool_audit RENAME TO tool_audit_old
+    """,
+    """
+    CREATE TABLE tool_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        conversation_id INTEGER
+            REFERENCES conversations(id) ON DELETE SET NULL,
+        tool TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        decision TEXT NOT NULL
+            CHECK (decision IN ('auto', 'approved', 'denied', 'timeout')),
+        status TEXT NOT NULL
+            CHECK (status IN ('ok', 'error', 'denied', 'skipped')),
+        error_kind TEXT,
+        duration_ms INTEGER NOT NULL
+    )
+    """,
+    """
+    DROP INDEX IF EXISTS idx_tool_audit_conversation_id
+    """,
+    """
+    CREATE INDEX idx_tool_audit_conversation_id
+        ON tool_audit(conversation_id)
+    """,
+    """
+    INSERT INTO tool_audit
+    SELECT id, ts, conversation_id, tool, args_json, permission, decision,
+           status, error_kind, duration_ms
+    FROM tool_audit_old
+    """,
+    """
+    DROP TABLE tool_audit_old
+    """,
+)
+
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: MIGRATION_1,
     2: MIGRATION_2,
+    3: MIGRATION_3,
+    4: MIGRATION_4,
 }
 
 

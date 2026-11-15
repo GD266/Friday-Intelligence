@@ -4,8 +4,21 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_allowed_apps() -> dict[str, str]:
+    return {
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "paint": "mspaint.exe",
+    }
 
 
 class AppSettings(BaseModel):
@@ -61,6 +74,42 @@ class UISettings(BaseModel):
     theme: str = "system"
 
 
+class ToolsSettings(BaseModel):
+    """Tool runtime settings."""
+
+    enabled: bool = True
+    max_iterations: int = Field(default=5, ge=1)
+    max_calls_per_turn: int = Field(default=8, ge=1)
+    tool_timeout_seconds: float = Field(default=10.0, gt=0)
+    confirm_timeout_seconds: float = Field(default=60.0, gt=0)
+    max_result_chars: int = Field(default=2000, ge=1)
+    allowed_apps: dict[str, str] = Field(
+        default_factory=_default_allowed_apps
+    )
+
+    @field_validator("allowed_apps")
+    @classmethod
+    def _validate_allowed_apps(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("allowed_apps must contain at least one app")
+        cleaned: dict[str, str] = {}
+        for name, executable in value.items():
+            clean_name = name.strip()
+            clean_executable = executable.strip()
+            if not clean_name:
+                raise ValueError("allowed_apps names must not be empty")
+            if not clean_executable:
+                raise ValueError(
+                    f"allowed_apps.{clean_name} must not be empty"
+                )
+            if "\x00" in clean_executable:
+                raise ValueError(
+                    f"allowed_apps.{clean_name} contains a null character"
+                )
+            cleaned[clean_name] = clean_executable
+        return cleaned
+
+
 class Settings(BaseSettings):
     """Main settings container."""
 
@@ -69,6 +118,7 @@ class Settings(BaseSettings):
     chat: ChatSettings = Field(default_factory=ChatSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    tools: ToolsSettings = Field(default_factory=ToolsSettings)
     ui: UISettings = Field(default_factory=UISettings)
 
     model_config = SettingsConfigDict(
@@ -114,6 +164,19 @@ max_messages_per_conversation = 500
 enabled = true
 fact_char_budget = 2000
 max_facts_in_prompt = 20
+
+[tools]
+enabled = true
+max_iterations = 5
+max_calls_per_turn = 8
+tool_timeout_seconds = 10.0
+confirm_timeout_seconds = 60.0
+max_result_chars = 2000
+
+[tools.allowed_apps]
+notepad = "notepad.exe"
+calculator = "calc.exe"
+paint = "mspaint.exe"
 
 [ui]
 window_width = 800
@@ -216,6 +279,18 @@ def _apply_env_overrides(data: dict) -> dict:
             "memory",
             "max_facts_in_prompt",
         ),
+        "FRIDAY_TOOLS__ENABLED": ("tools", "enabled"),
+        "FRIDAY_TOOLS__MAX_ITERATIONS": ("tools", "max_iterations"),
+        "FRIDAY_TOOLS__MAX_CALLS_PER_TURN": ("tools", "max_calls_per_turn"),
+        "FRIDAY_TOOLS__TOOL_TIMEOUT_SECONDS": (
+            "tools",
+            "tool_timeout_seconds",
+        ),
+        "FRIDAY_TOOLS__CONFIRM_TIMEOUT_SECONDS": (
+            "tools",
+            "confirm_timeout_seconds",
+        ),
+        "FRIDAY_TOOLS__MAX_RESULT_CHARS": ("tools", "max_result_chars"),
         "FRIDAY_UI__WINDOW_WIDTH": ("ui", "window_width"),
         "FRIDAY_UI__WINDOW_HEIGHT": ("ui", "window_height"),
         "FRIDAY_UI__THEME": ("ui", "theme"),
@@ -240,11 +315,18 @@ def _apply_env_overrides(data: dict) -> dict:
                 "window_width",
                 "window_height",
                 "context_char_budget",
+                "max_iterations",
+                "max_calls_per_turn",
+                "max_result_chars",
+                "tool_timeout_seconds",
+                "confirm_timeout_seconds",
             ):
                 is_float = key in (
                     "ping_timeout",
                     "connect_timeout_seconds",
                     "read_timeout_seconds",
+                    "tool_timeout_seconds",
+                    "confirm_timeout_seconds",
                 )
                 value = float(value) if is_float else int(value)
 

@@ -1,6 +1,20 @@
-"""Tools module for FRIDAY 2.0.
+"""Tool runtime for FRIDAY 2.0."""
 
-This is a placeholder - tool runtime will be implemented in later phases.
-"""
+from friday.tools.base import (
+    Permission,
+    Tool,
+    ToolContext,
+    ToolResult,
+)
+from friday.tools.builtin import build_builtin_registry
+from friday.tools.registry import ToolInfo, ToolRegistry
 
-__all__ = []
+__all__ = [
+    "Permission",
+    "Tool",
+    "ToolContext",
+    "ToolInfo",
+    "ToolRegistry",
+    "ToolResult",
+    "build_builtin_registry",
+]

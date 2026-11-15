@@ -37,6 +37,7 @@ def test_migrations_create_schema_and_set_user_version(tmp_path) -> None:
         }
         assert "conversations" in tables
         assert "messages" in tables
+        assert "tool_audit" in tables
         index = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' "
             "AND name = 'idx_messages_conversation_id_id'"

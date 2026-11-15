@@ -135,6 +135,12 @@ class Cancelled(GatewayError):
     kind = "Cancelled"
 
 
+class ModelRetired(GatewayError):
+    """The provider model has been retired/deprecated (HTTP 410)."""
+
+    kind = "ModelRetired"
+
+
 def build_http_error(
     status_code: int,
     body: str,
@@ -164,6 +170,14 @@ def build_http_error(
         return NotFound(
             "Model or endpoint not found (HTTP 404). "
             "Check provider.model and provider.base_url.",
+            status_code=status_code,
+            provider_message=provider_message,
+        )
+
+    if status_code == 410:
+        return ModelRetired(
+            "The provider says this model has been retired. "
+            "Run scripts/list_models.py and set provider.model in config.toml.",
             status_code=status_code,
             provider_message=provider_message,
         )
@@ -199,6 +213,7 @@ __all__ = [
     "Cancelled",
     "GatewayError",
     "MalformedResponse",
+    "ModelRetired",
     "NetworkError",
     "NotConfigured",
     "NotFound",
