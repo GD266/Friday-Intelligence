@@ -74,6 +74,28 @@ class UISettings(BaseModel):
     theme: str = "system"
 
 
+class VoiceSettings(BaseModel):
+    """Voice output (TTS) settings."""
+
+    speak_replies: bool = False
+    engine: str = Field(default="edge", pattern="^(edge|windows)$")
+    voice_name: str = ""
+    rate_percent: int = Field(default=0, ge=-50, le=50)
+    max_spoken_chars: int = Field(default=1200, ge=1)
+    tmp_dir: str = ""
+
+    @field_validator("tmp_dir")
+    @classmethod
+    def _validate_tmp_dir(cls, value: str) -> str:
+        if value:
+            path = Path(value)
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValueError(f"Cannot create tmp_dir {value}: {exc}") from exc
+        return value
+
+
 class ToolsSettings(BaseModel):
     """Tool runtime settings."""
 
@@ -120,6 +142,7 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     ui: UISettings = Field(default_factory=UISettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="FRIDAY_",
@@ -182,6 +205,14 @@ paint = "mspaint.exe"
 window_width = 800
 window_height = 600
 theme = "system"
+
+[voice]
+speak_replies = false
+engine = "edge"
+voice_name = ""
+rate_percent = 0
+max_spoken_chars = 1200
+tmp_dir = ""
 """.strip()
 
 
@@ -294,6 +325,12 @@ def _apply_env_overrides(data: dict) -> dict:
         "FRIDAY_UI__WINDOW_WIDTH": ("ui", "window_width"),
         "FRIDAY_UI__WINDOW_HEIGHT": ("ui", "window_height"),
         "FRIDAY_UI__THEME": ("ui", "theme"),
+        "FRIDAY_VOICE__SPEAK_REPLIES": ("voice", "speak_replies"),
+        "FRIDAY_VOICE__ENGINE": ("voice", "engine"),
+        "FRIDAY_VOICE__VOICE_NAME": ("voice", "voice_name"),
+        "FRIDAY_VOICE__RATE_PERCENT": ("voice", "rate_percent"),
+        "FRIDAY_VOICE__MAX_SPOKEN_CHARS": ("voice", "max_spoken_chars"),
+        "FRIDAY_VOICE__TMP_DIR": ("voice", "tmp_dir"),
     }
 
     result = data.copy()
@@ -301,7 +338,7 @@ def _apply_env_overrides(data: dict) -> dict:
         value = os.environ.get(env_var)
         if value is not None:
             # Convert value to appropriate type
-            if key in ("debug", "enabled"):
+            if key in ("debug", "enabled", "speak_replies"):
                 value = value.lower() in ("true", "1", "yes")
             elif key in (
                 "ping_timeout",
@@ -320,6 +357,8 @@ def _apply_env_overrides(data: dict) -> dict:
                 "max_result_chars",
                 "tool_timeout_seconds",
                 "confirm_timeout_seconds",
+                "rate_percent",
+                "max_spoken_chars",
             ):
                 is_float = key in (
                     "ping_timeout",

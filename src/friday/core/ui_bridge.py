@@ -23,6 +23,14 @@ class UIBridge(Protocol):
         """Read clipboard text on the UI thread, or None when unavailable."""
         ...
 
+    async def play_audio(self, path: str) -> None:
+        """Play an audio file on the UI thread. Raises on error."""
+        ...
+
+    async def stop_audio(self) -> None:
+        """Stop current audio playback."""
+        ...
+
     def deny_pending(self) -> None:
         """Resolve every pending confirmation to Deny."""
         ...
@@ -39,6 +47,12 @@ class DenyingUIBridge:
     async def read_clipboard_text(self) -> str | None:
         return None
 
+    async def play_audio(self, path: str) -> None:
+        return None
+
+    async def stop_audio(self) -> None:
+        return None
+
     def deny_pending(self) -> None:
         """No-op: this bridge never has pending requests."""
         return None
@@ -50,11 +64,14 @@ class QtUIBridge(QObject):
     Confirmation requests use the core's ``confirm_requested`` signal.  The
     clipboard request is emitted on this object; the main window connects it
     to a slot that reads ``QApplication.clipboard()`` on the UI thread.
-    Both responses return to the waiting asyncio loop through
-    ``loop.call_soon_threadsafe``.
+    Audio playback requests are emitted on this object; the main window
+    connects them to an AudioPlayer. Both responses return to the waiting
+    asyncio loop through ``loop.call_soon_threadsafe``.
     """
 
     clipboard_requested = Signal(str)
+    play_audio_requested = Signal(str, str)  # request_id, path
+    stop_audio_requested = Signal()
 
     def __init__(
         self,
@@ -70,6 +87,9 @@ class QtUIBridge(QObject):
         ] = {}
         self._clipboard_pending: dict[
             str, tuple[asyncio.AbstractEventLoop, asyncio.Future[str | None]]
+        ] = {}
+        self._audio_pending: dict[
+            str, tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]
         ] = {}
         self._lock = threading.Lock()
         self._closing = False
@@ -136,6 +156,40 @@ class QtUIBridge(QObject):
         loop, future = pending
         self._set_result(loop, future, text)
 
+    def resolve_audio(
+    self, request_id: str, error_kind: str | None = None, error_message: str = ""
+) -> None:
+        """Resolve a pending audio playback from the UI thread."""
+        with self._lock:
+            pending = self._audio_pending.pop(request_id, None)
+        if pending is None:
+            return
+        loop, future = pending
+        if error_kind:
+            self._set_result(loop, future, Exception(f"{error_kind}: {error_message}"))
+        else:
+            self._set_result(loop, future, None)
+
+    async def play_audio(self, path: str) -> None:
+        """Play an audio file on the UI thread. Raises on error."""
+        if self._closing:
+            return
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        request_id = uuid4().hex
+        with self._lock:
+            self._audio_pending[request_id] = (loop, future)
+        try:
+            self.play_audio_requested.emit(request_id, path)
+            await future
+        finally:
+            with self._lock:
+                self._audio_pending.pop(request_id, None)
+
+    async def stop_audio(self) -> None:
+        """Stop current audio playback."""
+        self.stop_audio_requested.emit()
+
     def deny_pending(self) -> None:
         """Deny every pending confirmation request."""
         with self._lock:
@@ -145,15 +199,19 @@ class QtUIBridge(QObject):
             self._set_result(loop, future, False)
 
     def cancel_pending(self) -> None:
-        """Deny confirmations and resolve clipboard reads to None."""
+        """Deny confirmations and resolve clipboard/audio reads to None."""
         with self._lock:
             confirm_pending = list(self._confirm_pending.values())
             clipboard_pending = list(self._clipboard_pending.values())
+            audio_pending = list(self._audio_pending.values())
             self._confirm_pending.clear()
             self._clipboard_pending.clear()
+            self._audio_pending.clear()
         for loop, future in confirm_pending:
             self._set_result(loop, future, False)
         for loop, future in clipboard_pending:
+            self._set_result(loop, future, None)
+        for loop, future in audio_pending:
             self._set_result(loop, future, None)
 
     def shutdown(self) -> None:

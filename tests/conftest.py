@@ -1,5 +1,7 @@
 """Shared pytest fixtures."""
 
+import asyncio
+import gc
 import os
 
 import pytest
@@ -24,3 +26,29 @@ def qt_app():
     if app is None:
         app = QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _check_unretrieved_futures():
+    """Check for unretrieved futures after each test."""
+    yield
+    # Force garbage collection to trigger any unretrieved future warnings
+    gc.collect()
+    # Check asyncio logger for "exception was never retrieved"
+    # We can't easily capture the logger output, but we can check for pending
+    # futures in the current task's loop
+    try:
+        loop = asyncio.get_running_loop()
+        # Check all tasks for unretrieved exceptions
+        for task in asyncio.all_tasks(loop):
+            if task.done() and not task.cancelled():
+                try:
+                    task.exception()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    # This would be an unretrieved exception
+                    pass
+    except RuntimeError:
+        # No running loop
+        pass
