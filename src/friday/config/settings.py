@@ -48,6 +48,9 @@ class MemorySettings(BaseModel):
     db_path: str = ""
     max_conversations: int = 1000
     max_messages_per_conversation: int = 500
+    enabled: bool = True
+    fact_char_budget: int = 2000
+    max_facts_in_prompt: int = 20
 
 
 class UISettings(BaseModel):
@@ -108,6 +111,9 @@ system_prompt = "You are FRIDAY, a concise, helpful personal assistant."
 db_path = ""
 max_conversations = 1000
 max_messages_per_conversation = 500
+enabled = true
+fact_char_budget = 2000
+max_facts_in_prompt = 20
 
 [ui]
 window_width = 800
@@ -204,6 +210,12 @@ def _apply_env_overrides(data: dict) -> dict:
             "memory",
             "max_messages_per_conversation",
         ),
+        "FRIDAY_MEMORY__ENABLED": ("memory", "enabled"),
+        "FRIDAY_MEMORY__FACT_CHAR_BUDGET": ("memory", "fact_char_budget"),
+        "FRIDAY_MEMORY__MAX_FACTS_IN_PROMPT": (
+            "memory",
+            "max_facts_in_prompt",
+        ),
         "FRIDAY_UI__WINDOW_WIDTH": ("ui", "window_width"),
         "FRIDAY_UI__WINDOW_HEIGHT": ("ui", "window_height"),
         "FRIDAY_UI__THEME": ("ui", "theme"),
@@ -214,7 +226,7 @@ def _apply_env_overrides(data: dict) -> dict:
         value = os.environ.get(env_var)
         if value is not None:
             # Convert value to appropriate type
-            if key in ("debug",):
+            if key in ("debug", "enabled"):
                 value = value.lower() in ("true", "1", "yes")
             elif key in (
                 "ping_timeout",
@@ -223,6 +235,8 @@ def _apply_env_overrides(data: dict) -> dict:
                 "max_queue_size",
                 "max_conversations",
                 "max_messages_per_conversation",
+                "fact_char_budget",
+                "max_facts_in_prompt",
                 "window_width",
                 "window_height",
                 "context_char_budget",

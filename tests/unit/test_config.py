@@ -39,6 +39,9 @@ class TestConfigDefaults:
             assert settings.provider.read_timeout_seconds == 90.0
             assert settings.provider.system_prompt
             assert settings.chat.context_char_budget == 24000
+            assert settings.memory.enabled is True
+            assert settings.memory.fact_char_budget == 2000
+            assert settings.memory.max_facts_in_prompt == 20
 
     def test_invalid_config_rejected(self, monkeypatch):
         """Test that invalid config raises clear error."""
@@ -81,11 +84,17 @@ class TestConfigDefaults:
             monkeypatch.setenv("FRIDAY_PROVIDER__MODEL", "meta/llama-3.1-8b")
             monkeypatch.setenv("FRIDAY_PROVIDER__READ_TIMEOUT_SECONDS", "12.5")
             monkeypatch.setenv("FRIDAY_CHAT__CONTEXT_CHAR_BUDGET", "1234")
+            monkeypatch.setenv("FRIDAY_MEMORY__ENABLED", "false")
+            monkeypatch.setenv("FRIDAY_MEMORY__FACT_CHAR_BUDGET", "1500")
+            monkeypatch.setenv("FRIDAY_MEMORY__MAX_FACTS_IN_PROMPT", "7")
             settings = load_settings()
             assert settings.app.log_level == "DEBUG"
             assert settings.provider.model == "meta/llama-3.1-8b"
             assert settings.provider.read_timeout_seconds == 12.5
             assert settings.chat.context_char_budget == 1234
+            assert settings.memory.enabled is False
+            assert settings.memory.fact_char_budget == 1500
+            assert settings.memory.max_facts_in_prompt == 7
 
 
 class TestConfigFileCompatibility:

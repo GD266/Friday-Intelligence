@@ -2,31 +2,28 @@
 
 import logging
 import os
-import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+from friday.security import redaction
+from friday.security.redaction import contains_secret, redact_text
+
+__all__ = [
+    "RedactionFilter",
+    "contains_secret",
+    "get_log_dir",
+    "get_logger",
+    "redact_text",
+    "setup_logging",
+]
 
 
 class RedactionFilter(logging.Filter):
     """Filter that redacts API keys and sensitive tokens from log messages."""
 
-    # Patterns for common API key formats (order matters - more specific first)
-    PATTERNS = [
-        # Anthropic API keys (sk-ant-...)
-        (re.compile(r"sk-ant-[a-zA-Z0-9-_]{95,}"), "sk-ant-***REDACTED***"),
-        # Google API keys (AIza...)
-        (re.compile(r"AIza[a-zA-Z0-9-_]{35}"), "AIza***REDACTED***"),
-        # Generic Bearer tokens
-        (re.compile(r"Bearer\s+[a-zA-Z0-9-_=]+"), "Bearer ***REDACTED***"),
-        # gsk_... keys (Groq)
-        (re.compile(r"gsk_[a-zA-Z0-9]{50,}"), "gsk_***REDACTED***"),
-        # NVIDIA API keys (nvapi-...)
-        (re.compile(r"nvapi-[a-zA-Z0-9-_]{20,}"), "nvapi-***REDACTED***"),
-        # OpenAI API keys (sk-... 48 chars)
-        (re.compile(r"sk-[a-zA-Z0-9]{48}"), "sk-***REDACTED***"),
-        # Generic sk-... keys (fallback)
-        (re.compile(r"sk-[a-zA-Z0-9-_]{20,}"), "sk-***REDACTED***"),
-    ]
+    # Populated from the central security module so every redaction path
+    # shares exactly the same patterns.
+    PATTERNS = redaction.PATTERNS
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
@@ -40,13 +37,6 @@ class RedactionFilter(logging.Filter):
 
     def _redact(self, text: str) -> str:
         return redact_text(text)
-
-
-def redact_text(text: str) -> str:
-    """Return *text* with known API key formats masked."""
-    for pattern, replacement in RedactionFilter.PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
 
 
 

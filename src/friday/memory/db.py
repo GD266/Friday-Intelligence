@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATION_1 = (
     """
@@ -41,8 +41,88 @@ MIGRATION_1 = (
     """,
 )
 
+MIGRATION_2 = (
+    """
+    CREATE TABLE facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'user'
+            CHECK (source IN ('user')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE facts_fts USING fts5(
+        content,
+        content='facts',
+        content_rowid='id'
+    )
+    """,
+    """
+    CREATE TRIGGER facts_fts_ai AFTER INSERT ON facts BEGIN
+        INSERT INTO facts_fts(rowid, content)
+        VALUES (new.id, new.content);
+    END
+    """,
+    """
+    CREATE TRIGGER facts_fts_ad AFTER DELETE ON facts BEGIN
+        INSERT INTO facts_fts(facts_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    END
+    """,
+    """
+    CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN
+        INSERT INTO facts_fts(facts_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+        INSERT INTO facts_fts(rowid, content)
+        VALUES (new.id, new.content);
+    END
+    """,
+    """
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+        content,
+        content='messages',
+        content_rowid='id'
+    )
+    """,
+    """
+    CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages
+    WHEN new.status = 'complete'
+    BEGIN
+        INSERT INTO messages_fts(rowid, content)
+        VALUES (new.id, new.content);
+    END
+    """,
+    """
+    CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages
+    WHEN old.status = 'complete'
+    BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    END
+    """,
+    """
+    CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+        SELECT 'delete', old.id, old.content
+        WHERE old.status = 'complete';
+        INSERT INTO messages_fts(rowid, content)
+        SELECT new.id, new.content
+        WHERE new.status = 'complete';
+    END
+    """,
+    """
+    INSERT INTO messages_fts(rowid, content)
+    SELECT id, content
+    FROM messages
+    WHERE status = 'complete'
+    """,
+)
+
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: MIGRATION_1,
+    2: MIGRATION_2,
 }
 
 
@@ -72,6 +152,30 @@ class DatabaseClosedError(DatabaseError):
 
 class DatabaseThreadError(DatabaseError):
     """The database was used from a thread other than its owning thread."""
+
+
+class FTS5UnavailableError(DatabaseError):
+    """The SQLite build does not provide FTS5 full-text search."""
+
+
+def verify_fts5(connection: sqlite3.Connection, path: Path) -> None:
+    """Verify that this SQLite build can create FTS5 tables.
+
+    The check creates and drops a temporary table so it has no effect on the
+    application schema.
+    """
+    try:
+        connection.execute(
+            "CREATE VIRTUAL TABLE temp.__friday_fts5_check "
+            "USING fts5(content)"
+        )
+        connection.execute("DROP TABLE temp.__friday_fts5_check")
+    except sqlite3.Error as exc:
+        raise FTS5UnavailableError(
+            "SQLite FTS5 full-text search is not available for "
+            f"{path}: {exc}. FRIDAY requires a Python/SQLite build with "
+            "FTS5 support enabled."
+        ) from exc
 
 
 def get_data_dir() -> Path:
@@ -207,6 +311,7 @@ class Database:
                     f"Could not enable foreign keys for {self.path}."
                 )
 
+            verify_fts5(connection, self.path)
             self._migrate(connection)
         except StorageError:
             connection.close()
@@ -235,6 +340,7 @@ class Database:
 
         for target_version in range(current_version + 1, SCHEMA_VERSION + 1):
             try:
+                connection.execute("BEGIN")
                 for statement in MIGRATIONS[target_version]:
                     connection.execute(statement)
                 connection.execute(

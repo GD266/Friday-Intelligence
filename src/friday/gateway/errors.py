@@ -7,7 +7,7 @@ attached to an exception.
 
 from __future__ import annotations
 
-from friday.core.logging import redact_text
+from friday.security.redaction import redact_text
 
 MAX_PROVIDER_MESSAGE_CHARS = 300
 

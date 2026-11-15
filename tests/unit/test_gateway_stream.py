@@ -11,7 +11,9 @@ from friday.config.settings import ProviderSettings
 from friday.gateway import errors
 from friday.gateway.openai_compat import OpenAICompatProvider
 from friday.gateway.types import EVENT_DONE, EVENT_TOKEN, Message
+from friday.security.redaction import register_secret
 from friday.security.secrets import PROVIDER_API_KEY
+from tests.unit.test_logging import NEW_SECRET_SAMPLES
 
 KEY = "test-secret-key-abc123"
 
@@ -543,4 +545,40 @@ async def test_provider_body_is_redacted_and_truncated() -> None:
     assert secret not in text
     assert "sk-aaaa" not in text
     assert len(exc_info.value.provider_message) <= 300
+    await provider.aclose()
+
+
+@pytest.mark.parametrize(("secret", "marker"), NEW_SECRET_SAMPLES)
+async def test_new_secret_formats_are_redacted_in_provider_errors(
+    secret: str, marker: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=f"provider rejected {secret}")
+
+    provider = make_provider(handler, max_retries=0)
+
+    with pytest.raises(errors.ServerError) as exc_info:
+        await collect(provider)
+
+    text = str(exc_info.value)
+    assert secret not in text
+    assert marker in text
+    await provider.aclose()
+
+
+async def test_registered_secret_is_redacted_in_provider_errors() -> None:
+    secret = "provider-echo-format-Q7"
+    register_secret(secret)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=f"provider echoed {secret}")
+
+    provider = make_provider(handler, max_retries=0)
+
+    with pytest.raises(errors.ServerError) as exc_info:
+        await collect(provider)
+
+    text = str(exc_info.value)
+    assert secret not in text
+    assert "***REDACTED***" in text
     await provider.aclose()

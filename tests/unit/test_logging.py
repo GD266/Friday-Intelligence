@@ -2,7 +2,57 @@
 
 import logging
 
+import pytest
+
 from friday.core.logging import RedactionFilter, setup_logging
+from friday.security.redaction import redact_text, register_secret
+
+NEW_SECRET_SAMPLES = [
+    pytest.param(
+        "nvapi-abc123456789",
+        "nvapi-***REDACTED***",
+        id="reported-nvidia",
+    ),
+    pytest.param(
+        "nvapi-" + "A1" * 10,
+        "nvapi-***REDACTED***",
+        id="nvidia",
+    ),
+    pytest.param(
+        "ghp_" + "a1" * 12,
+        "ghp_***REDACTED***",
+        id="github-classic",
+    ),
+    pytest.param(
+        "github_pat_" + "a1_" * 8,
+        "github_pat_***REDACTED***",
+        id="github-fine-grained",
+    ),
+    pytest.param(
+        "AKIA" + "1234567890ABCDEF",
+        "AKIA***REDACTED***",
+        id="aws-access-key",
+    ),
+    pytest.param(
+        "xoxb-1234567890-abcdef",
+        "xox-***REDACTED***",
+        id="slack",
+    ),
+    pytest.param(
+        "eyJhbGciOiJIUzI1NiJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        "***REDACTED-JWT***",
+        id="jwt",
+    ),
+    pytest.param(
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA1234567890abcdef\n"
+        "-----END RSA PRIVATE KEY-----",
+        "***REDACTED PRIVATE KEY***",
+        id="pem-private-key",
+    ),
+]
 
 
 class TestLogRedaction:
@@ -95,6 +145,37 @@ class TestLogRedaction:
         )
         filter_.filter(record)
         assert "sk-***REDACTED***" in record.getMessage()
+
+    @pytest.mark.parametrize(("secret", "marker"), NEW_SECRET_SAMPLES)
+    def test_redacts_new_secret_formats(self, secret, marker):
+        """Every newly supported format is masked in log records."""
+        filter_ = RedactionFilter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg=f"provider rejected {secret} during request",
+            args=(),
+            exc_info=None,
+        )
+
+        filter_.filter(record)
+
+        message = record.getMessage()
+        assert secret not in message
+        assert marker in message
+
+    def test_registered_secret_is_redacted_in_logs(self):
+        """An arbitrary-format runtime secret is masked by exact value."""
+        secret = "custom-format-secret-Q7"
+        assert secret in redact_text(secret)
+
+        register_secret(secret)
+
+        message = redact_text(f"provider echoed {secret} back")
+        assert secret not in message
+        assert "***REDACTED***" in message
 
     def test_setup_logging_creates_file(self, monkeypatch, tmp_path):
         """Test that setup_logging creates log file."""

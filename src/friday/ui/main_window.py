@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QPoint, Qt, Signal, Slot
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -30,12 +30,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from friday.core.service import CoreService
+from friday.core.service import CoreService, parse_command
 from friday.memory.conversations import (
     STATUS_INCOMPLETE,
     Conversation,
     StoredMessage,
 )
+from friday.memory.facts import Fact
+from friday.memory.search import SearchResult
+from friday.ui.memory_dialog import MemoryDialog
 
 
 def _relative_time(timestamp: str) -> str:
@@ -84,6 +87,11 @@ class MainWindow(QMainWindow):
         self._assistant_open = False
         self._assistant_has_tokens = False
         self._conversations: dict[int, Conversation] = {}
+        self._facts: list[Fact] = []
+        self._search_results: list[SearchResult] = []
+        self._search_active = False
+        self._facts_list_pending = 0
+        self._memory_dialog: MemoryDialog | None = None
         self._current_conversation_id = 0
         self._setup_ui()
         self._connect_signals()
@@ -111,6 +119,17 @@ class MainWindow(QMainWindow):
         )
         sidebar_layout.addWidget(sidebar_title)
 
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Search chats...")
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.textChanged.connect(self._on_search_text_changed)
+        sidebar_layout.addWidget(self._search_box)
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._run_search)
+
         self._conversation_list = QListWidget()
         self._conversation_list.setMinimumWidth(200)
         self._conversation_list.setMaximumWidth(260)
@@ -136,7 +155,13 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel("Core: running | Idle")
         self._status_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         status_row.addWidget(self._status_label)
+
+        self._facts_status_label = QLabel("Using 0 facts")
+        status_row.addWidget(self._facts_status_label)
         status_row.addStretch(1)
+        self._memory_button = QPushButton("Memory")
+        self._memory_button.clicked.connect(self._on_memory_clicked)
+        status_row.addWidget(self._memory_button)
         self._ping_button = QPushButton("Ping core")
         self._ping_button.clicked.connect(self._on_ping_clicked)
         status_row.addWidget(self._ping_button)
@@ -204,6 +229,10 @@ class MainWindow(QMainWindow):
             self._on_conversation_deleted
         )
         self._core.signals.memory_error.connect(self._on_memory_error)
+        self._core.signals.facts_used.connect(self._on_facts_used)
+        self._core.signals.facts_loaded.connect(self._on_facts_loaded)
+        self._core.signals.memory_notice.connect(self._on_memory_notice)
+        self._core.signals.search_results.connect(self._on_search_results)
 
     # ------------------------------------------------------------------
     # Transcript helpers
@@ -297,6 +326,17 @@ class MainWindow(QMainWindow):
         cursor.insertText(message, body)
         self._commit(cursor)
 
+    def _append_notice(self, text: str) -> None:
+        """Append a memory/command confirmation line."""
+        cursor = self._cursor_at_end()
+        self._start_block(cursor)
+        label = QTextCharFormat()
+        label.setForeground(self._palette_color(QPalette.ColorRole.Link))
+        label.setFontWeight(QFont.Weight.Bold)
+        cursor.insertText("Memory: ", label)
+        cursor.insertText(text, self._body_format())
+        self._commit(cursor)
+
     # ------------------------------------------------------------------
     # Streaming state
     # ------------------------------------------------------------------
@@ -319,6 +359,20 @@ class MainWindow(QMainWindow):
 
         self._input.clear()
         self._append_user(text)
+
+        command = parse_command(text)
+        if command is not None:
+            name, _ = command
+            if name == "/facts":
+                self._facts_list_pending += 1
+            try:
+                self._core.send_command(text)
+            except Exception as exc:
+                if name == "/facts" and self._facts_list_pending:
+                    self._facts_list_pending -= 1
+                self._append_error(exc.__class__.__name__, str(exc))
+            return
+
         self._begin_assistant()
         self._set_streaming(True)
 
@@ -391,6 +445,12 @@ class MainWindow(QMainWindow):
         self._conversations = {
             conversation.id: conversation for conversation in conversations
         }
+        if not self._search_active:
+            self._render_conversations(conversations)
+
+    def _render_conversations(
+        self, conversations: list[Conversation]
+    ) -> None:
         self._conversation_list.clear()
         for conversation in conversations:
             item = QListWidgetItem(
@@ -401,6 +461,52 @@ class MainWindow(QMainWindow):
                 Qt.ItemDataRole.UserRole, conversation.id
             )
             item.setToolTip(conversation.title)
+            self._conversation_list.addItem(item)
+        self._select_conversation(self._current_conversation_id)
+
+    @Slot(str)
+    def _on_search_text_changed(self, text: str) -> None:
+        if not text.strip():
+            self._search_timer.stop()
+            self._search_active = False
+            self._search_results = []
+            self._render_conversations(list(self._conversations.values()))
+            return
+        self._search_timer.start()
+
+    @Slot()
+    def _run_search(self) -> None:
+        query = self._search_box.text().strip()
+        if not query:
+            self._search_active = False
+            self._render_conversations(list(self._conversations.values()))
+            return
+        try:
+            self._core.search_chats(query)
+        except Exception as exc:
+            self._search_active = False
+            self._append_error(exc.__class__.__name__, str(exc))
+            self._render_conversations(list(self._conversations.values()))
+
+    @Slot(list)
+    def _on_search_results(self, results: list[SearchResult]) -> None:
+        if not self._search_box.text().strip():
+            self._search_active = False
+            self._render_conversations(list(self._conversations.values()))
+            return
+        self._search_active = True
+        self._search_results = list(results)
+        self._conversation_list.clear()
+        for result in self._search_results:
+            snippet = result.snippet or result.role
+            item = QListWidgetItem(
+                f"{result.conversation_title}\n"
+                f"{snippet}   {_relative_time(result.created_at)}"
+            )
+            item.setData(
+                Qt.ItemDataRole.UserRole, result.conversation_id
+            )
+            item.setToolTip(snippet)
             self._conversation_list.addItem(item)
         self._select_conversation(self._current_conversation_id)
 
@@ -435,11 +541,60 @@ class MainWindow(QMainWindow):
             self._transcript.clear()
             self._set_streaming(False)
         self._output_label.setText("Conversation deleted")
+        if self._search_active:
+            self._run_search()
 
     @Slot(str, str)
     def _on_memory_error(self, kind: str, message: str) -> None:
+        self._facts_list_pending = 0
         self._append_error(kind, message)
         self._output_label.setText(f"Memory error: {kind}")
+
+    @Slot(int)
+    def _on_facts_used(self, count: int) -> None:
+        self._facts_status_label.setText(f"Using {count} facts")
+
+    @Slot(list)
+    def _on_facts_loaded(self, facts: list[Fact]) -> None:
+        self._facts = list(facts)
+        if self._memory_dialog is not None:
+            self._memory_dialog.set_facts(self._facts)
+        if self._facts_list_pending > 0:
+            self._facts_list_pending -= 1
+            self._append_facts_list(self._facts)
+
+    def _append_facts_list(self, facts: list[Fact]) -> None:
+        if not facts:
+            self._append_notice("No facts saved.")
+            return
+        lines = [f"Facts ({len(facts)}):"]
+        lines.extend(f"{fact.id}. {fact.content}" for fact in facts)
+        self._append_notice("\n".join(lines))
+
+    @Slot(str)
+    def _on_memory_notice(self, text: str) -> None:
+        self._append_notice(text)
+        self._output_label.setText(text)
+
+    @Slot()
+    def _on_memory_clicked(self) -> None:
+        if not self._core.is_running:
+            self._append_error(
+                "CoreNotRunning", "Memory is unavailable while core is stopped."
+            )
+            return
+        try:
+            self._core.refresh_facts()
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+            return
+        dialog = MemoryDialog(self._core, self._facts, self)
+        self._memory_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._memory_dialog = None
+            dialog.deleteLater()
 
     def _on_conversation_clicked(self, item: QListWidgetItem) -> None:
         conversation_id = item.data(Qt.ItemDataRole.UserRole)
@@ -574,6 +729,7 @@ class MainWindow(QMainWindow):
     def _on_core_stopped(self) -> None:
         self._status_label.setText("Core: stopped")
         self._ping_button.setEnabled(False)
+        self._memory_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
@@ -582,6 +738,7 @@ class MainWindow(QMainWindow):
         """Mark the core as failed and disable core-dependent controls."""
         self._status_label.setText(f"Core: failed - {message}")
         self._ping_button.setEnabled(False)
+        self._memory_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)

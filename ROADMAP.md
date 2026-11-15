@@ -141,6 +141,50 @@ Implemented.
 - **Audit Logging**: Comprehensive logging for all security events
 - **Least Privilege**: Minimum permissions required for operations
 
+## Phase 3: Facts + Full-Text Search
+
+### Status
+
+Implemented.
+
+### Deliverables
+
+- Migration 2: `facts` table, FTS5 `facts_fts`, FTS5 `messages_fts` limited to
+  complete messages, synchronization triggers, backfill of existing complete
+  messages, and startup FTS5 availability verification with a typed error
+- `memory/facts.py`: validated fact CRUD (300 characters, 200 facts,
+  secret-pattern rejection) and FTS relevance search
+- `memory/search.py`: sanitized full-text message search grouped by
+  conversation, with snippets and timestamps
+- Core: facts block in the system message with budget/count limits and
+  relevance ranking, `facts_used`, `facts_loaded`, `memory_notice`, and
+  `search_results` signals, and `/remember`, `/facts`, `/forget` commands that
+  never call the provider
+- UI: Memory dialog with Add/Edit/Delete and confirmation, debounced sidebar
+  conversation search, and a "Using N facts" status
+- Config: `memory.enabled`, `memory.fact_char_budget`,
+  `memory.max_facts_in_prompt`
+
+### Acceptance Criteria
+
+- `ruff check .` clean and `pytest -v` green with temporary databases only
+- A schema version 1 database upgrades without losing conversations or messages
+- FTS indexes stay synchronized after fact/message updates and deletes,
+  including conversation cascade deletes
+- Hostile FTS input never reaches `MATCH` raw and never raises
+- No AI-extracted or automatically saved facts are introduced
+
+## Phase 3b: Summaries
+
+### Status
+
+Planned.
+
+### Scope
+
+Conversation summaries and any summary-aware context compaction are deferred
+to Phase 3b. Phase 3 does not generate, store, or inject summaries.
+
 ## Implementation Details
 
 ### Component Structure

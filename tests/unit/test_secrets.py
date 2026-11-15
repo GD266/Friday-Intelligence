@@ -5,6 +5,7 @@ import pytest
 from keyring.backend import KeyringBackend
 from keyring.compat import properties
 
+from friday.security.redaction import redact_text
 from friday.security.secrets import SecretManager
 
 
@@ -88,6 +89,18 @@ class TestSecrets:
         repr_str = repr(manager)
         assert "super-secret-value" not in repr_str
         assert "test-service" in repr_str
+
+    def test_get_secret_registers_value_for_redaction(self):
+        """Retrieved arbitrary-format secrets are masked by exact value."""
+        manager = SecretManager("test-service")
+        value = "registry-arbitrary-Q7"
+        manager.set_secret("registry-key", value)
+
+        assert manager.get_secret("registry-key") == value
+
+        text = redact_text(f"provider echoed {value}")
+        assert value not in text
+        assert "***REDACTED***" in text
 
     def test_logs_dont_contain_secrets(self, caplog):
         """Test that secrets don't appear in logs."""

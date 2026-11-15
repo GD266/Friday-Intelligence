@@ -5,6 +5,8 @@ from typing import Optional
 import keyring
 from keyring.errors import KeyringError
 
+from friday.security.redaction import register_secret
+
 # Keyring entry name used for the OpenAI-compatible provider API key.
 PROVIDER_API_KEY = "provider_api_key"
 
@@ -28,11 +30,17 @@ class SecretManager:
             raise RuntimeError(f"Failed to store secret '{key}': {e}")
 
     def get_secret(self, key: str) -> Optional[str]:
-        """Retrieve a secret. Returns None if not found."""
+        """Retrieve a secret. Returns None if not found.
+
+        Retrieved values are registered for exact-match redaction so keys in
+        arbitrary formats are still masked in logs and error text.
+        """
         try:
-            return keyring.get_password(self._service, key)
+            value = keyring.get_password(self._service, key)
         except KeyringError as e:
             raise RuntimeError(f"Failed to retrieve secret '{key}': {e}")
+        register_secret(value)
+        return value
 
     def delete_secret(self, key: str) -> bool:
         """Delete a secret. Returns True if deleted, False if not found."""

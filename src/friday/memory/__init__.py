@@ -18,14 +18,29 @@ from friday.memory.db import (
     DatabaseLockedError,
     DatabaseThreadError,
     DatabaseVersionError,
+    FTS5UnavailableError,
     StorageError,
     get_data_dir,
     get_db_path,
     get_default_db_path,
     resolve_db_path,
+    verify_fts5,
 )
+from friday.memory.facts import (
+    MAX_FACT_CHARS,
+    MAX_FACTS,
+    Fact,
+    FactError,
+    FactLimitError,
+    FactNotFound,
+    FactRepository,
+    FactValidationError,
+)
+from friday.memory.search import SearchResult, SearchService
 
 __all__ = [
+    "MAX_FACT_CHARS",
+    "MAX_FACTS",
     "SCHEMA_VERSION",
     "STATUS_COMPLETE",
     "STATUS_INCOMPLETE",
@@ -39,6 +54,15 @@ __all__ = [
     "DatabaseLockedError",
     "DatabaseThreadError",
     "DatabaseVersionError",
+    "FTS5UnavailableError",
+    "Fact",
+    "FactError",
+    "FactLimitError",
+    "FactNotFound",
+    "FactRepository",
+    "FactValidationError",
+    "SearchResult",
+    "SearchService",
     "StorageError",
     "StoredMessage",
     "auto_title",
@@ -46,4 +70,5 @@ __all__ = [
     "get_db_path",
     "get_default_db_path",
     "resolve_db_path",
+    "verify_fts5",
 ]
