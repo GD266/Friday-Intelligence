@@ -84,6 +84,16 @@ class MemorySystemInterface:
         pass
 ```
 
+#### Conversation Persistence (Phase 2)
+
+Conversations and messages are stored in `%LOCALAPPDATA%\Friday\friday.db`
+using stdlib `sqlite3` (WAL mode, foreign keys enabled, versioned
+`PRAGMA user_version` migrations). The connection is owned by the core thread;
+the UI never accesses SQLite directly. `memory/db.py` owns schema setup and
+typed storage errors, and `memory/conversations.py` provides the conversation
+repository. Core sends only complete messages that fit
+`chat.context_char_budget`, always retaining the latest user message.
+
 #### Voice Pipeline Interface
 ```python
 class VoicePipelineInterface:

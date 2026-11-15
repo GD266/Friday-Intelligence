@@ -24,6 +24,12 @@ class CoreSettings(BaseModel):
     max_queue_size: int = 100
 
 
+class ChatSettings(BaseModel):
+    """Chat context settings."""
+
+    context_char_budget: int = 24000
+
+
 class ProviderSettings(BaseModel):
     """OpenAI-compatible AI provider settings."""
 
@@ -57,6 +63,7 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     core: CoreSettings = Field(default_factory=CoreSettings)
+    chat: ChatSettings = Field(default_factory=ChatSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     ui: UISettings = Field(default_factory=UISettings)
@@ -86,6 +93,9 @@ debug = false
 [core]
 ping_timeout = 5.0
 max_queue_size = 100
+
+[chat]
+context_char_budget = 24000
 
 [provider]
 base_url = "https://integrate.api.nvidia.com/v1"
@@ -176,6 +186,7 @@ def _apply_env_overrides(data: dict) -> dict:
         "FRIDAY_APP__DEBUG": ("app", "debug"),
         "FRIDAY_CORE__PING_TIMEOUT": ("core", "ping_timeout"),
         "FRIDAY_CORE__MAX_QUEUE_SIZE": ("core", "max_queue_size"),
+        "FRIDAY_CHAT__CONTEXT_CHAR_BUDGET": ("chat", "context_char_budget"),
         "FRIDAY_PROVIDER__BASE_URL": ("provider", "base_url"),
         "FRIDAY_PROVIDER__MODEL": ("provider", "model"),
         "FRIDAY_PROVIDER__CONNECT_TIMEOUT_SECONDS": (
@@ -214,6 +225,7 @@ def _apply_env_overrides(data: dict) -> dict:
                 "max_messages_per_conversation",
                 "window_width",
                 "window_height",
+                "context_char_budget",
             ):
                 is_float = key in (
                     "ping_timeout",

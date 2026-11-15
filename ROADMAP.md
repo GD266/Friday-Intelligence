@@ -110,6 +110,31 @@ Implemented.
 - `python -m friday` opens the chat UI; a missing model/key shows `NotConfigured`
   with remediation steps
 
+## Phase 2: Conversation Persistence
+
+### Status
+
+Implemented.
+
+### Deliverables
+
+- `memory/db.py`: SQLite connection at `%LOCALAPPDATA%\Friday\friday.db`, WAL,
+  foreign keys, versioned migrations, thread ownership checks, typed errors
+- `memory/conversations.py`: parameterized conversation/message repository and
+  automatic titles
+- Core persistence: user messages stored immediately; complete and incomplete
+  assistant replies stored with status; database-aware context selection with
+  `chat.context_char_budget`
+- Conversation sidebar with open, new, rename, and confirmed delete actions
+- Incomplete replies marked `(incomplete)` when a conversation is reopened
+
+### Acceptance Criteria
+
+- `ruff check .` clean and `pytest -v` green, with temporary databases only
+- Conversations and messages survive restart
+- Deleting a conversation removes its messages
+- Database failures and newer schema versions surface as typed UI errors
+
 ### Security Model
 - **Secure by Design**: No plaintext credential storage
 - **Operation Confirmation**: Explicit user consent for sensitive operations

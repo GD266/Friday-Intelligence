@@ -5,6 +5,7 @@ signals/slots for UI communication.
 """
 
 import asyncio
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -24,8 +25,56 @@ from friday.gateway.types import (
     ROLE_USER,
     Message,
 )
+from friday.memory.conversations import (
+    STATUS_COMPLETE,
+    STATUS_INCOMPLETE,
+    ConversationRepository,
+    StoredMessage,
+    auto_title,
+)
+from friday.memory.db import (
+    Database,
+    StorageError,
+    resolve_db_path,
+)
 
 logger = get_logger(__name__)
+
+
+def select_context_messages(
+    messages: list[StoredMessage], char_budget: int
+) -> list[StoredMessage]:
+    """Select the newest complete messages that fit *char_budget*.
+
+    The latest user message is always included, even if it alone exceeds the
+    budget.  Messages are never split; the oldest messages are dropped first.
+    """
+    selected = list(messages)
+    latest_user_index: int | None = None
+    for index in range(len(selected) - 1, -1, -1):
+        if selected[index].role == ROLE_USER:
+            latest_user_index = index
+            break
+
+    budget = max(0, char_budget)
+    total_chars = sum(len(message.content) for message in selected)
+    while total_chars > budget and len(selected) > 1:
+        drop_index = next(
+            (
+                index
+                for index in range(len(selected))
+                if index != latest_user_index
+            ),
+            None,
+        )
+        if drop_index is None:
+            break
+        total_chars -= len(selected[drop_index].content)
+        selected.pop(drop_index)
+        if latest_user_index is not None and drop_index < latest_user_index:
+            latest_user_index -= 1
+
+    return selected
 
 
 @dataclass
@@ -65,6 +114,13 @@ class CoreSignals(QObject):
     chat_error = Signal(str, str)
     chat_cancelled = Signal()
 
+    # Conversation persistence signals
+    conversations_loaded = Signal(list)
+    conversation_opened = Signal(int, list)
+    conversation_created = Signal(int, str)
+    conversation_deleted = Signal(int)
+    memory_error = Signal(str, str)
+
 
 class CoreService:
     """Core service running asyncio loop in a dedicated thread."""
@@ -89,6 +145,9 @@ class CoreService:
         self._owns_provider = provider is None
         self._history: list[Message] = []
         self._chat_task: asyncio.Task | None = None
+        self._database: Database | None = None
+        self._repository: ConversationRepository | None = None
+        self._current_conversation_id = 0
 
     @property
     def signals(self) -> CoreSignals:
@@ -97,6 +156,11 @@ class CoreService:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def current_conversation_id(self) -> int:
+        """Return the open conversation id, or 0 for an unsaved new chat."""
+        return self._current_conversation_id
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -169,8 +233,39 @@ class CoreService:
         """Cancel any in-flight request and clear the session history."""
         if not self._running or self._loop is None:
             self._history.clear()
+            self._current_conversation_id = 0
             return
         self._loop.call_soon_threadsafe(self._clear_chat)
+
+    def open_conversation(self, conversation_id: int) -> None:
+        """Open a persisted conversation from the UI thread."""
+        if not self._running or self._loop is None:
+            raise RuntimeError("Core service not running")
+        self._loop.call_soon_threadsafe(
+            self._open_conversation, conversation_id
+        )
+
+    def new_conversation(self) -> None:
+        """Start an empty, unsaved conversation from the UI thread."""
+        if not self._running or self._loop is None:
+            raise RuntimeError("Core service not running")
+        self._loop.call_soon_threadsafe(self._new_conversation)
+
+    def rename_conversation(self, conversation_id: int, title: str) -> None:
+        """Rename a persisted conversation from the UI thread."""
+        if not self._running or self._loop is None:
+            raise RuntimeError("Core service not running")
+        self._loop.call_soon_threadsafe(
+            self._rename_conversation, conversation_id, title
+        )
+
+    def delete_conversation(self, conversation_id: int) -> None:
+        """Delete a persisted conversation from the UI thread."""
+        if not self._running or self._loop is None:
+            raise RuntimeError("Core service not running")
+        self._loop.call_soon_threadsafe(
+            self._delete_conversation, conversation_id
+        )
 
     def send_ping(self, payload: str = "ping") -> None:
         """Send a ping to the core service from the UI thread."""
@@ -202,6 +297,241 @@ class CoreService:
         if task is not None and not task.done():
             task.cancel()
         self._history.clear()
+        self._current_conversation_id = 0
+
+    def _is_busy(self) -> bool:
+        return self._chat_task is not None and not self._chat_task.done()
+
+    def _require_repository(self) -> ConversationRepository:
+        if self._repository is None:
+            raise StorageError(
+                "Conversation storage is not available. "
+                "Check the database error shown at startup."
+            )
+        return self._repository
+
+    def _initialize_memory(self) -> None:
+        """Open the database and load conversations on the core thread."""
+        configured_path = None
+        if self._settings is not None:
+            configured_path = self._settings.memory.db_path
+        else:
+            configured_path = os.environ.get("FRIDAY_MEMORY__DB_PATH")
+
+        database: Database | None = None
+        try:
+            path = resolve_db_path(configured_path)
+            database = Database(path)
+            repository = ConversationRepository(database)
+            conversations = repository.list_conversations()
+        except StorageError as exc:
+            if database is not None:
+                try:
+                    database.close()
+                except StorageError:
+                    logger.debug(
+                        "Failed to close database after startup error",
+                        exc_info=True,
+                    )
+            self._database = None
+            self._repository = None
+            logger.exception("Failed to open conversation database")
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return
+
+        self._database = database
+        self._repository = repository
+        self._signals.conversations_loaded.emit(conversations)
+        if conversations:
+            self._open_conversation(conversations[0].id)
+        else:
+            self._signals.conversation_opened.emit(0, [])
+
+    def _emit_conversations_loaded(self) -> None:
+        if self._repository is None:
+            return
+        try:
+            conversations = self._repository.list_conversations()
+        except StorageError as exc:
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return
+        self._signals.conversations_loaded.emit(conversations)
+
+    def _open_conversation(self, conversation_id: int) -> None:
+        if self._is_busy():
+            self._signals.memory_error.emit(
+                "Busy",
+                "A reply is still streaming. "
+                "Press Stop before opening another conversation.",
+            )
+            return
+
+        try:
+            repository = self._require_repository()
+            repository.get_conversation(conversation_id)
+            messages = repository.get_messages(conversation_id)
+        except StorageError as exc:
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return
+
+        self._current_conversation_id = conversation_id
+        self._history = [
+            Message(message.role, message.content)
+            for message in messages
+            if message.status == STATUS_COMPLETE
+        ]
+        self._signals.conversation_opened.emit(
+            conversation_id, messages
+        )
+
+    def _new_conversation(self) -> None:
+        if self._is_busy():
+            self._signals.memory_error.emit(
+                "Busy",
+                "A reply is still streaming. "
+                "Press Stop before starting a new conversation.",
+            )
+            return
+        self._current_conversation_id = 0
+        self._history.clear()
+        self._signals.conversation_opened.emit(0, [])
+
+    def _rename_conversation(self, conversation_id: int, title: str) -> None:
+        try:
+            self._require_repository().rename(conversation_id, title)
+        except (StorageError, ValueError) as exc:
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return
+        self._emit_conversations_loaded()
+
+    def _delete_conversation(self, conversation_id: int) -> None:
+        if self._is_busy():
+            self._signals.memory_error.emit(
+                "Busy",
+                "A reply is still streaming. "
+                "Press Stop before deleting a conversation.",
+            )
+            return
+
+        try:
+            self._require_repository().delete(conversation_id)
+        except StorageError as exc:
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return
+
+        if self._current_conversation_id == conversation_id:
+            self._current_conversation_id = 0
+            self._history.clear()
+        self._signals.conversation_deleted.emit(conversation_id)
+        self._emit_conversations_loaded()
+
+    def _persist_user_message(self, text: str) -> int:
+        repository = self._require_repository()
+        conversation_id = self._current_conversation_id
+        created = False
+        title = ""
+
+        if conversation_id <= 0:
+            title = auto_title(text)
+            conversation_id = repository.create_conversation(title)
+            self._current_conversation_id = conversation_id
+            created = True
+
+        try:
+            repository.add_message(
+                conversation_id, ROLE_USER, text, STATUS_COMPLETE
+            )
+        except StorageError:
+            if created:
+                try:
+                    repository.delete(conversation_id)
+                except StorageError:
+                    logger.debug(
+                        "Failed to remove empty conversation after error",
+                        exc_info=True,
+                    )
+                self._current_conversation_id = 0
+            raise
+
+        if created:
+            self._signals.conversation_created.emit(
+                conversation_id, title
+            )
+        self._emit_conversations_loaded()
+        return conversation_id
+
+    def _persist_message(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        status: str,
+    ) -> bool:
+        try:
+            self._require_repository().add_message(
+                conversation_id, role, content, status
+            )
+        except StorageError as exc:
+            self._signals.memory_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
+            return False
+        self._emit_conversations_loaded()
+        return True
+
+    def _persist_partial(
+        self, conversation_id: int, parts: list[str]
+    ) -> None:
+        content = "".join(parts)
+        if conversation_id <= 0 or not content:
+            return
+        self._persist_message(
+            conversation_id,
+            ROLE_ASSISTANT,
+            content,
+            STATUS_INCOMPLETE,
+        )
+
+    def _context_char_budget(self) -> int:
+        if self._settings is not None:
+            return self._settings.chat.context_char_budget
+        configured = os.environ.get("FRIDAY_CHAT__CONTEXT_CHAR_BUDGET")
+        if configured is not None:
+            return int(configured)
+        from friday.config.settings import ChatSettings
+
+        return ChatSettings().context_char_budget
+
+    def _context_messages(self, conversation_id: int) -> list[Message]:
+        repository = self._require_repository()
+        rows = repository.get_messages(
+            conversation_id, complete_only=True
+        )
+        selected = select_context_messages(
+            rows, self._context_char_budget()
+        )
+        return [Message(row.role, row.content) for row in selected]
+
+    def _close_memory(self) -> None:
+        database = self._database
+        self._database = None
+        self._repository = None
+        if database is None:
+            return
+        try:
+            database.close()
+        except StorageError:
+            logger.exception("Failed to close conversation database")
 
     def _system_prompt(self) -> str:
         if self._settings is not None:
@@ -228,15 +558,16 @@ class CoreService:
 
     async def _run_chat(self, text: str) -> None:
         parts: list[str] = []
+        conversation_id = self._current_conversation_id
         try:
+            conversation_id = self._persist_user_message(text)
             provider = self._ensure_provider()
 
             messages: list[Message] = []
             system_prompt = self._system_prompt()
             if system_prompt:
                 messages.append(Message(ROLE_SYSTEM, system_prompt))
-            messages.extend(self._history)
-            messages.append(Message(ROLE_USER, text))
+            messages.extend(self._context_messages(conversation_id))
 
             async for event in provider.stream_chat(messages):
                 if event.type == EVENT_TOKEN:
@@ -258,18 +589,33 @@ class CoreService:
                 )
                 return
 
-            self._history.append(Message(ROLE_USER, text))
-            self._history.append(Message(ROLE_ASSISTANT, full_text))
+            persisted = self._persist_message(
+                conversation_id,
+                ROLE_ASSISTANT,
+                full_text,
+                STATUS_COMPLETE,
+            )
+            if persisted:
+                self._history.append(Message(ROLE_USER, text))
+                self._history.append(Message(ROLE_ASSISTANT, full_text))
             self._signals.message_done.emit(full_text)
 
         except errors.Cancelled:
+            self._persist_partial(conversation_id, parts)
             self._signals.chat_cancelled.emit()
         except errors.GatewayError as exc:
+            self._persist_partial(conversation_id, parts)
             self._signals.chat_error.emit(exc.kind, str(exc))
         except asyncio.CancelledError:
+            self._persist_partial(conversation_id, parts)
             self._signals.chat_cancelled.emit()
             raise
+        except StorageError as exc:
+            self._signals.chat_error.emit(
+                exc.__class__.__name__, str(exc)
+            )
         except Exception as exc:
+            self._persist_partial(conversation_id, parts)
             logger.exception("Chat request failed")
             self._signals.chat_error.emit(exc.__class__.__name__, str(exc))
 
@@ -295,13 +641,16 @@ class CoreService:
                         asyncio.gather(*pending, return_exceptions=True)
                     )
             finally:
+                self._close_memory()
                 self._loop.close()
                 self._loop = None
+                self._running = False
 
     async def _main(self) -> None:
         """Main async entry point."""
         logger.debug("Core async loop started")
         self._signals.started.emit()
+        self._initialize_memory()
 
         # Process ping queue
         ping_task = asyncio.create_task(self._process_pings())
@@ -321,6 +670,7 @@ class CoreService:
 
         await self._shutdown_chat()
         await self._close_provider()
+        self._close_memory()
 
         self._signals.stopped.emit()
         logger.debug("Core async loop stopped")

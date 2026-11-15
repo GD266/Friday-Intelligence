@@ -1,8 +1,9 @@
 """Main window for FRIDAY 2.0."""
 
 import sys
+from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QPoint, Qt, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -14,8 +15,14 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QTextEdit,
@@ -24,6 +31,32 @@ from PySide6.QtWidgets import (
 )
 
 from friday.core.service import CoreService
+from friday.memory.conversations import (
+    STATUS_INCOMPLETE,
+    Conversation,
+    StoredMessage,
+)
+
+
+def _relative_time(timestamp: str) -> str:
+    """Format an ISO-8601 UTC timestamp for the conversation list."""
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return ""
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+
+    seconds = int((datetime.now(timezone.utc) - then).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    if seconds < 7 * 86400:
+        return f"{seconds // 86400}d ago"
+    return then.astimezone().strftime("%b %d")
 
 
 class ChatInput(QPlainTextEdit):
@@ -50,6 +83,8 @@ class MainWindow(QMainWindow):
         self._streaming = False
         self._assistant_open = False
         self._assistant_has_tokens = False
+        self._conversations: dict[int, Conversation] = {}
+        self._current_conversation_id = 0
         self._setup_ui()
         self._connect_signals()
 
@@ -61,9 +96,41 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        layout = QVBoxLayout(central)
+        outer_layout = QHBoxLayout(central)
+        outer_layout.setSpacing(12)
+        outer_layout.setContentsMargins(12, 12, 12, 12)
+
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(6)
+
+        sidebar_title = QLabel("Conversations")
+        sidebar_title.setStyleSheet(
+            "font-size: 14px; font-weight: bold;"
+        )
+        sidebar_layout.addWidget(sidebar_title)
+
+        self._conversation_list = QListWidget()
+        self._conversation_list.setMinimumWidth(200)
+        self._conversation_list.setMaximumWidth(260)
+        self._conversation_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._conversation_list.customContextMenuRequested.connect(
+            self._on_conversation_context_menu
+        )
+        self._conversation_list.itemClicked.connect(
+            self._on_conversation_clicked
+        )
+        sidebar_layout.addWidget(self._conversation_list, 1)
+        outer_layout.addWidget(sidebar)
+
+        chat_panel = QWidget()
+        layout = QVBoxLayout(chat_panel)
         layout.setSpacing(10)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(chat_panel, 1)
 
         status_row = QHBoxLayout()
         self._status_label = QLabel("Core: running | Idle")
@@ -124,6 +191,19 @@ class MainWindow(QMainWindow):
         self._core.signals.message_done.connect(self._on_message_done)
         self._core.signals.chat_error.connect(self._on_chat_error)
         self._core.signals.chat_cancelled.connect(self._on_chat_cancelled)
+        self._core.signals.conversations_loaded.connect(
+            self._on_conversations_loaded
+        )
+        self._core.signals.conversation_opened.connect(
+            self._on_conversation_opened
+        )
+        self._core.signals.conversation_created.connect(
+            self._on_conversation_created
+        )
+        self._core.signals.conversation_deleted.connect(
+            self._on_conversation_deleted
+        )
+        self._core.signals.memory_error.connect(self._on_memory_error)
 
     # ------------------------------------------------------------------
     # Transcript helpers
@@ -256,12 +336,16 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_new_chat_clicked(self) -> None:
-        self._core.clear_chat()
-        self._transcript.clear()
-        self._assistant_open = False
-        self._assistant_has_tokens = False
-        self._set_streaming(False)
-        self._output_label.setText("New chat")
+        if self._streaming:
+            self._output_label.setText(
+                "Stop the current reply before starting a new chat."
+            )
+            return
+        try:
+            self._core.new_conversation()
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+            self._set_streaming(False)
 
     @Slot(str)
     def _on_token(self, text: str) -> None:
@@ -298,6 +382,170 @@ class MainWindow(QMainWindow):
         self._output_label.setText("Reply cancelled")
 
     # ------------------------------------------------------------------
+    # Conversation slots
+    # ------------------------------------------------------------------
+    @Slot(list)
+    def _on_conversations_loaded(
+        self, conversations: list[Conversation]
+    ) -> None:
+        self._conversations = {
+            conversation.id: conversation for conversation in conversations
+        }
+        self._conversation_list.clear()
+        for conversation in conversations:
+            item = QListWidgetItem(
+                f"{conversation.title}   "
+                f"{_relative_time(conversation.updated_at)}"
+            )
+            item.setData(
+                Qt.ItemDataRole.UserRole, conversation.id
+            )
+            item.setToolTip(conversation.title)
+            self._conversation_list.addItem(item)
+        self._select_conversation(self._current_conversation_id)
+
+    @Slot(int, list)
+    def _on_conversation_opened(
+        self, conversation_id: int, messages: list[StoredMessage]
+    ) -> None:
+        self._current_conversation_id = conversation_id
+        self._render_messages(messages)
+        self._select_conversation(conversation_id)
+        if conversation_id == 0:
+            self._output_label.setText("New chat")
+        else:
+            self._output_label.setText(
+                f"Opened conversation "
+                f"({len(messages)} messages)"
+            )
+
+    @Slot(int, str)
+    def _on_conversation_created(
+        self, conversation_id: int, title: str
+    ) -> None:
+        self._current_conversation_id = conversation_id
+        self._select_conversation(conversation_id)
+
+    @Slot(int)
+    def _on_conversation_deleted(self, conversation_id: int) -> None:
+        if conversation_id == self._current_conversation_id:
+            self._current_conversation_id = 0
+            self._assistant_open = False
+            self._assistant_has_tokens = False
+            self._transcript.clear()
+            self._set_streaming(False)
+        self._output_label.setText("Conversation deleted")
+
+    @Slot(str, str)
+    def _on_memory_error(self, kind: str, message: str) -> None:
+        self._append_error(kind, message)
+        self._output_label.setText(f"Memory error: {kind}")
+
+    def _on_conversation_clicked(self, item: QListWidgetItem) -> None:
+        conversation_id = item.data(Qt.ItemDataRole.UserRole)
+        if conversation_id is None:
+            return
+        if self._streaming:
+            self._output_label.setText(
+                "Stop the current reply before opening another conversation."
+            )
+            self._select_conversation(self._current_conversation_id)
+            return
+        try:
+            self._core.open_conversation(int(conversation_id))
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+
+    @Slot(QPoint)
+    def _on_conversation_context_menu(self, position) -> None:
+        item = self._conversation_list.itemAt(position)
+        if item is None:
+            return
+        conversation_id = item.data(Qt.ItemDataRole.UserRole)
+        if conversation_id is None:
+            return
+        conversation = self._conversations.get(int(conversation_id))
+        if conversation is None:
+            return
+
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename")
+        delete_action = menu.addAction("Delete")
+        chosen = menu.exec(
+            self._conversation_list.viewport().mapToGlobal(position)
+        )
+        if chosen == rename_action:
+            self._rename_conversation(conversation)
+        elif chosen == delete_action:
+            self._delete_conversation(conversation)
+
+    def _rename_conversation(self, conversation: Conversation) -> None:
+        title, accepted = QInputDialog.getText(
+            self,
+            "Rename conversation",
+            "Title:",
+            QLineEdit.EchoMode.Normal,
+            conversation.title,
+        )
+        if not accepted:
+            return
+        title = title.strip()
+        if not title:
+            self._output_label.setText("Conversation title cannot be empty.")
+            return
+        try:
+            self._core.rename_conversation(conversation.id, title)
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+
+    def _delete_conversation(self, conversation: Conversation) -> None:
+        if self._streaming:
+            self._output_label.setText(
+                "Stop the current reply before deleting a conversation."
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete conversation",
+            f'Delete "{conversation.title}" and all of its messages?',
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._core.delete_conversation(conversation.id)
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+
+    def _select_conversation(self, conversation_id: int) -> None:
+        for row in range(self._conversation_list.count()):
+            item = self._conversation_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == conversation_id:
+                self._conversation_list.setCurrentItem(item)
+                return
+
+    def _render_messages(self, messages: list[StoredMessage]) -> None:
+        self._transcript.clear()
+        self._assistant_open = False
+        self._assistant_has_tokens = False
+        for message in messages:
+            if message.role == "user":
+                self._append_user(message.content)
+            elif message.role == "assistant":
+                self._begin_assistant()
+                if message.content:
+                    self._append_token(message.content)
+                self._assistant_open = False
+                self._assistant_has_tokens = False
+                if message.status == STATUS_INCOMPLETE:
+                    self._insert_marker(
+                        " (incomplete)", self._error_color()
+                    )
+        self._set_streaming(False)
+
+    # ------------------------------------------------------------------
     # Core status / ping slots
     # ------------------------------------------------------------------
     @Slot()
@@ -328,6 +576,7 @@ class MainWindow(QMainWindow):
         self._ping_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
+        self._new_chat_button.setEnabled(False)
 
     def set_core_failed(self, message: str) -> None:
         """Mark the core as failed and disable core-dependent controls."""
@@ -335,6 +584,8 @@ class MainWindow(QMainWindow):
         self._ping_button.setEnabled(False)
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
+        self._new_chat_button.setEnabled(False)
+        self._conversation_list.setEnabled(False)
 
     def closeEvent(self, event) -> None:
         """Handle window close event."""

@@ -2,7 +2,15 @@
 
 import time
 
+import pytest
+
 from friday.core.service import CoreService
+
+
+@pytest.fixture(autouse=True)
+def isolated_localappdata(monkeypatch, tmp_path):
+    """Keep the default database inside the test temp directory."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 
 
 class TestCoreService:

@@ -38,6 +38,7 @@ class TestConfigDefaults:
             assert settings.provider.connect_timeout_seconds == 10.0
             assert settings.provider.read_timeout_seconds == 90.0
             assert settings.provider.system_prompt
+            assert settings.chat.context_char_budget == 24000
 
     def test_invalid_config_rejected(self, monkeypatch):
         """Test that invalid config raises clear error."""
@@ -79,10 +80,12 @@ class TestConfigDefaults:
             monkeypatch.setenv("FRIDAY_APP__LOG_LEVEL", "DEBUG")
             monkeypatch.setenv("FRIDAY_PROVIDER__MODEL", "meta/llama-3.1-8b")
             monkeypatch.setenv("FRIDAY_PROVIDER__READ_TIMEOUT_SECONDS", "12.5")
+            monkeypatch.setenv("FRIDAY_CHAT__CONTEXT_CHAR_BUDGET", "1234")
             settings = load_settings()
             assert settings.app.log_level == "DEBUG"
             assert settings.provider.model == "meta/llama-3.1-8b"
             assert settings.provider.read_timeout_seconds == 12.5
+            assert settings.chat.context_char_budget == 1234
 
 
 class TestConfigFileCompatibility:

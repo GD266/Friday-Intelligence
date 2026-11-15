@@ -7,6 +7,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtTest import QSignalSpy
 
+from friday.config.settings import MemorySettings, Settings
 from friday.core.service import CoreService
 from friday.gateway import errors
 from friday.gateway.base import Provider
@@ -19,6 +20,13 @@ def qapp():
     if app is None:
         app = QCoreApplication([])
     yield app
+
+
+@pytest.fixture
+def test_settings(tmp_path):
+    return Settings(
+        memory=MemorySettings(db_path=str(tmp_path / "friday.db"))
+    )
 
 
 class FakeProvider(Provider):
@@ -57,7 +65,7 @@ def wait_until(predicate, timeout: float = 3.0) -> bool:
     return predicate()
 
 
-def test_successful_chat_updates_history(qapp) -> None:
+def test_successful_chat_updates_history(qapp, test_settings) -> None:
     provider = FakeProvider(
         [
             StreamEvent(EVENT_TOKEN, "Hello"),
@@ -65,7 +73,7 @@ def test_successful_chat_updates_history(qapp) -> None:
             StreamEvent(EVENT_DONE),
         ]
     )
-    core = CoreService(provider=provider)
+    core = CoreService(provider=provider, settings=test_settings)
     tokens = QSignalSpy(core.signals.token)
     done = QSignalSpy(core.signals.message_done)
     core.start()
@@ -89,11 +97,11 @@ def test_successful_chat_updates_history(qapp) -> None:
         core.stop()
 
 
-def test_second_turn_includes_previous_messages(qapp) -> None:
+def test_second_turn_includes_previous_messages(qapp, test_settings) -> None:
     provider = FakeProvider(
         [StreamEvent(EVENT_TOKEN, "ok"), StreamEvent(EVENT_DONE)]
     )
-    core = CoreService(provider=provider)
+    core = CoreService(provider=provider, settings=test_settings)
     done = QSignalSpy(core.signals.message_done)
     core.start()
 
@@ -111,12 +119,12 @@ def test_second_turn_includes_previous_messages(qapp) -> None:
         core.stop()
 
 
-def test_failed_stream_keeps_partial_but_not_history(qapp) -> None:
+def test_failed_stream_keeps_partial_but_not_history(qapp, test_settings) -> None:
     provider = FakeProvider(
         [StreamEvent(EVENT_TOKEN, "partial")],
         error=errors.ServerError("boom"),
     )
-    core = CoreService(provider=provider)
+    core = CoreService(provider=provider, settings=test_settings)
     tokens = QSignalSpy(core.signals.token)
     chat_errors = QSignalSpy(core.signals.chat_error)
     core.start()
@@ -133,12 +141,12 @@ def test_failed_stream_keeps_partial_but_not_history(qapp) -> None:
         core.stop()
 
 
-def test_concurrent_send_is_rejected(qapp) -> None:
+def test_concurrent_send_is_rejected(qapp, test_settings) -> None:
     provider = FakeProvider(
         [StreamEvent(EVENT_TOKEN, str(index)) for index in range(10)],
         token_delay=0.05,
     )
-    core = CoreService(provider=provider)
+    core = CoreService(provider=provider, settings=test_settings)
     tokens = QSignalSpy(core.signals.token)
     chat_errors = QSignalSpy(core.signals.chat_error)
     cancelled = QSignalSpy(core.signals.chat_cancelled)
@@ -160,11 +168,11 @@ def test_concurrent_send_is_rejected(qapp) -> None:
         core.stop()
 
 
-def test_clear_chat_empties_history(qapp) -> None:
+def test_clear_chat_empties_history(qapp, test_settings) -> None:
     provider = FakeProvider(
         [StreamEvent(EVENT_TOKEN, "ok"), StreamEvent(EVENT_DONE)]
     )
-    core = CoreService(provider=provider)
+    core = CoreService(provider=provider, settings=test_settings)
     done = QSignalSpy(core.signals.message_done)
     core.start()
 
