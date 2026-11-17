@@ -81,15 +81,23 @@ class RecordingBridge:
     """UI bridge fake that records playback and serves clipboard reads."""
 
     def __init__(
-        self, *, clipboard: str | None = None, approve: bool = True
+        self,
+        *,
+        clipboard: str | None = None,
+        approve: bool = True,
+        hold: bool = False,
     ) -> None:
         self.play_requests: list[str] = []
         self.stopped = False
         self.clipboard = clipboard
         self.approve = approve
+        self.hold = hold
 
     async def play_audio(self, path: str) -> None:
         self.play_requests.append(path)
+        if self.hold:
+            # Hold playback open until stop() cancels it.
+            await asyncio.sleep(30)
 
     async def stop_audio(self) -> None:
         self.stopped = True
@@ -353,6 +361,147 @@ def test_speak_replies_false_never_constructs_engine(
         assert wait_until(lambda: done.count() >= 1)
         assert core._speech_queue is None
         assert created == []
+    finally:
+        core.stop()
+
+
+def test_runtime_flag_enables_speech_when_config_disabled(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """Enabling at runtime speaks even though the config default is false."""
+    bridge = RecordingBridge()
+    settings = Settings(
+        memory=MemorySettings(db_path=str(tmp_path / "friday.db")),
+        voice=VoiceSettings(
+            speak_replies=False, engine="edge", voice_name="en-US-Test"
+        ),
+    )
+    core = make_core(settings, FakeProvider(["Enabled at runtime."]))
+    core.start()
+
+    try:
+        core.set_ui_bridge(bridge)
+        core.set_speech_enabled_sync(True)
+        core.chat_send("hello")
+        assert wait_until(lambda: len(bridge.play_requests) > 0)
+    finally:
+        core.stop()
+
+
+def test_toggle_off_mid_speech_then_on_again(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """Disabling stops mid-speech and silences the next reply; enabling speaks."""
+    bridge = RecordingBridge(hold=True)
+    provider = FakeProvider(["First reply.", "Second reply.", "Third reply."])
+    core = make_core(voice_settings(tmp_path), provider)
+    done = QSignalSpy(core.signals.message_done)
+    finished = QSignalSpy(core.signals.speech_finished)
+    errors = QSignalSpy(core.signals.speech_error)
+    core.start()
+
+    try:
+        core.set_ui_bridge(bridge)
+        core.chat_send("first")
+        assert wait_until(lambda: len(bridge.play_requests) >= 1)
+
+        core.set_speech_enabled_sync(False)
+        assert wait_until(lambda: core._speech_queue is None)
+        assert wait_until(lambda: finished.count() == 1)
+        assert bridge.stopped
+
+        bridge.hold = False
+        settle()
+        core.chat_send("second")
+        assert wait_until(lambda: done.count() >= 2)
+        settle(0.2)
+        spoken_while_off = len(bridge.play_requests)
+
+        core.set_speech_enabled_sync(True)
+        assert wait_until(lambda: core._speech_queue is not None)
+        core.chat_send("third")
+        assert wait_until(
+            lambda: len(bridge.play_requests) > spoken_while_off
+        )
+        assert errors.count() == 0
+    finally:
+        core.stop()
+
+
+@pytest.mark.parametrize(
+    ("ending", "expect_finished", "expect_errors"),
+    [
+        ("finish", 1, 0),
+        ("error", 0, 1),
+        ("stop", 1, 0),
+        ("window_close", 1, 0),
+        ("disable", 1, 0),
+    ],
+)
+def test_every_speech_ending_emits_exactly_one_terminal_signal(
+    qapp, tmp_path, monkeypatch, ending, expect_finished, expect_errors
+) -> None:
+    """Finish, error, stop, window close and disable emit one terminal signal."""
+    engine = FakeEngine(fail=ending == "error")
+    monkeypatch.setattr(
+        "friday.voice.create_engine", lambda name, **kwargs: engine
+    )
+    bridge = RecordingBridge(hold=ending in ("stop", "window_close", "disable"))
+    core = make_core(
+        voice_settings(tmp_path), FakeProvider(["One reply sentence."])
+    )
+    finished = QSignalSpy(core.signals.speech_finished)
+    errors = QSignalSpy(core.signals.speech_error)
+    core.start()
+
+    try:
+        core.set_ui_bridge(bridge)
+        core.chat_send("hello")
+
+        if ending in ("stop", "window_close", "disable"):
+            assert wait_until(lambda: len(bridge.play_requests) >= 1)
+            if ending == "disable":
+                core.set_speech_enabled_sync(False)
+            else:
+                # closeEvent uses the same public method as the Stop button.
+                core.stop_speaking()
+
+        assert wait_until(
+            lambda: finished.count() + errors.count() >= 1
+        )
+        settle(0.3)
+
+        assert finished.count() == expect_finished
+        assert errors.count() == expect_errors
+        assert finished.count() + errors.count() == 1
+    finally:
+        core.stop()
+
+
+def test_read_clipboard_privacy_holds_when_enabled_at_runtime(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """With the runtime switch on, a tainted edge turn is notice-only."""
+    bridge = RecordingBridge(clipboard="clipboard secret")
+    settings = Settings(
+        memory=MemorySettings(db_path=str(tmp_path / "friday.db")),
+        voice=VoiceSettings(speak_replies=False, engine="edge"),
+    )
+    core = make_core(
+        settings,
+        FakeProvider(["Clipboard reply."], clipboard_turn=True),
+    )
+    notices = QSignalSpy(core.signals.speech_notice)
+    core.start()
+
+    try:
+        core.set_ui_bridge(bridge)
+        core.set_speech_enabled_sync(True)
+        core.chat_send("read my clipboard")
+        assert wait_until(lambda: notices.count() >= 1)
+        settle(0.2)
+        assert bridge.play_requests == []
+        assert "clipboard" in notices.at(0)[0]
     finally:
         core.stop()
 

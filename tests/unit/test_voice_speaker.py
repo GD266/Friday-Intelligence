@@ -409,6 +409,31 @@ async def test_prefetch_preserves_order_with_slow_synthesis() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_drops_stale_tasks_and_emits_one_terminal_signal() -> None:
+    """Stopping before playback drops stale work and reports one finish."""
+    finished: list[None] = []
+    errors: list[tuple[str, str]] = []
+    queue = SpeechQueue(
+        make_factory(TimingEngine(delay=0.2)),
+        lambda: _FakeBridge(),
+        on_finished=lambda: finished.append(None),
+        on_error=lambda kind, msg: errors.append((kind, msg)),
+    )
+    queue.enqueue("first", "v", 0, "fake")
+    queue.enqueue("second", "v", 0, "fake")
+    await asyncio.sleep(0.02)
+
+    await queue.stop()
+    assert len(finished) == 1
+    assert errors == []
+
+    # A second stop must not emit another terminal signal.
+    await queue.stop()
+    assert len(finished) == 1
+    assert errors == []
+
+
+@pytest.mark.asyncio
 async def test_stop_mid_play_deletes_unplayed_and_next_reply_plays(
     tmp_path,
 ) -> None:

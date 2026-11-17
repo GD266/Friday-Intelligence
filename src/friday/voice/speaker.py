@@ -103,6 +103,8 @@ class SpeechQueue:
         self._prev_play_finished_at: float | None = None
         self._first_audio_logged = False
         self._reply_failed = False
+        self._terminal_emitted = False
+        self._episode_active = False
 
         # Callbacks
         self._on_started = on_started
@@ -161,6 +163,9 @@ class SpeechQueue:
             enqueued_at=time.perf_counter(),
         )
         self._queue.put_nowait(task)
+        if not self._episode_active:
+            self._episode_active = True
+            self._terminal_emitted = False
         logger.info(
             "speech_enqueued: len=%d generation=%d queued=%d",
             len(text),
@@ -203,6 +208,9 @@ class SpeechQueue:
         await self._cancel_pipeline()
         self._delete_ready_files()
         await self._stop_audio()
+        # Every ending path must produce exactly one terminal signal. A stop
+        # during playback would otherwise leave the UI stuck on "Speaking…".
+        self._emit_finished()
 
         logger.info("speech_stop_completed: generation=%d", generation)
         # A reply may have been accepted while stop() was awaiting. It must
@@ -312,6 +320,8 @@ class SpeechQueue:
                 self._prev_play_finished_at = None
                 self._first_audio_logged = False
                 self._reply_failed = False
+                self._terminal_emitted = False
+                self._episode_active = True
                 self._producer_task = asyncio.create_task(self._producer())
                 self._consumer_task = asyncio.create_task(self._consumer())
                 try:
@@ -328,11 +338,12 @@ class SpeechQueue:
                     self._producer_task = None
                     self._consumer_task = None
                 if self._reply_failed:
-                    # One speech_error was already emitted; the rest of this
-                    # reply was discarded. The queue stays usable.
+                    # One terminal signal (speech_error) was already emitted;
+                    # the rest of this reply was discarded. The queue stays
+                    # usable for the next reply.
+                    self._delete_ready_files()
                     logger.info(
-                        "speech_reply_stopped: reason=synthesis_error "
-                        "remaining=%d",
+                        "speech_reply_stopped: reason=failure remaining=%d",
                         self._queue.qsize(),
                     )
                     break
@@ -350,13 +361,14 @@ class SpeechQueue:
             # Work arrived while the pass was finishing; keep it moving.
             self._ensure_processor()
             return
-        if self._on_finished:
-            self._on_finished()
+        self._emit_finished()
 
     async def _producer(self) -> None:
         """Synthesize ahead of playback, bounded by ``prefetch_sentences``."""
         try:
             while True:
+                if self._reply_failed:
+                    break
                 try:
                     task = self._batch.get_nowait()
                 except asyncio.QueueEmpty:
@@ -409,6 +421,10 @@ class SpeechQueue:
                     )
                     continue
 
+                if self._reply_failed:
+                    self._slots.release()
+                    self._remove_audio(result)
+                    break
                 await self._ready.put((task, result))
 
             await self._ready.put(_PRODUCER_DONE)
@@ -440,6 +456,15 @@ class SpeechQueue:
                     continue
 
                 await self._play(result, task)
+                if self._reply_failed:
+                    # Playback failed; later clips must not play.
+                    while True:
+                        try:
+                            self._batch.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    self._delete_ready_files()
+                    break
         except asyncio.CancelledError:
             logger.info("cancelled: trigger=stop consumer")
             raise
@@ -483,8 +508,8 @@ class SpeechQueue:
         )
         return result
 
-    async def _play(self, result: SynthesisResult, task: SpeechTask) -> None:
-        """Play an audio file through the UI bridge, with timing and a timeout."""
+    async def _play(self, result: SynthesisResult, task: SpeechTask) -> bool:
+        """Play one clip; return False when playback failed."""
         audio_path = Path(result.audio_path)
         bridge = self._get_bridge()
         now = time.perf_counter()
@@ -507,6 +532,7 @@ class SpeechQueue:
             logger.info("first_audio: first_audio_ms=%.1f", first_audio_ms)
 
         started = time.perf_counter()
+        ok = True
         try:
             await asyncio.wait_for(
                 bridge.play_audio(str(audio_path)),
@@ -524,9 +550,11 @@ class SpeechQueue:
                 "PlaybackTimeout",
                 f"Playback timed out after {self._playback_timeout:.1f}s",
             )
+            ok = False
         except Exception as exc:
             logger.info("play_error: kind=%s", type(exc).__name__)
             self._emit_error(type(exc).__name__, str(exc))
+            ok = False
         else:
             logger.info("play_finished: generation=%d", task.generation)
         finally:
@@ -536,6 +564,9 @@ class SpeechQueue:
                 "play_timing: gap_ms=%.1f play_ms=%.1f", gap_ms, play_ms
             )
             self._remove_audio(result)
+        if not ok:
+            self._reply_failed = True
+        return ok
 
     @staticmethod
     def _remove_audio(result: SynthesisResult) -> None:
@@ -546,9 +577,22 @@ class SpeechQueue:
             pass
 
     def _emit_error(self, kind: str, message: str) -> None:
-        """Emit error via callback."""
+        """Emit the single terminal error signal for this speech episode."""
+        if self._terminal_emitted or not self._episode_active:
+            return
+        self._terminal_emitted = True
+        self._episode_active = False
         if self._on_error:
             self._on_error(kind, message)
+
+    def _emit_finished(self) -> None:
+        """Emit the single terminal finished signal for this speech episode."""
+        if self._terminal_emitted or not self._episode_active:
+            return
+        self._terminal_emitted = True
+        self._episode_active = False
+        if self._on_finished:
+            self._on_finished()
 
     def _emit_notice(self, message: str) -> None:
         """Emit notice via callback."""

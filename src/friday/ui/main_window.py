@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QInputDialog,
@@ -44,6 +45,16 @@ from friday.ui.audio_player import AudioPlayer
 from friday.ui.confirm_dialog import ConfirmDialog
 from friday.ui.memory_dialog import MemoryDialog
 from friday.ui.tools_dialog import ToolsDialog
+
+
+def _speech_tooltip(engine: str) -> str:
+    """Tooltip for the session-only speech checkbox."""
+    suffix = (
+        "Session setting: edit config.toml to change the default."
+    )
+    if engine == "windows":
+        return f"Spoken offline on this PC. {suffix}"
+    return f"Reply text is sent to Microsoft to create the voice. {suffix}"
 
 
 def _relative_time(timestamp: str) -> str:
@@ -225,6 +236,21 @@ class MainWindow(QMainWindow):
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self._on_stop_clicked)
         button_row.addWidget(self._stop_button)
+
+        self._speak_checkbox = QCheckBox("Speak replies")
+        self._speak_checkbox.setChecked(self._core.speech_enabled)
+        self._speak_checkbox.setToolTip(
+            _speech_tooltip(self._core.speech_engine)
+        )
+        self._speak_checkbox.toggled.connect(self._on_speak_toggled)
+        button_row.addWidget(self._speak_checkbox)
+
+        self._stop_speaking_button = QPushButton("Stop speaking")
+        self._stop_speaking_button.setEnabled(False)
+        self._stop_speaking_button.clicked.connect(
+            self._on_stop_speaking_clicked
+        )
+        button_row.addWidget(self._stop_speaking_button)
 
         self._new_chat_button = QPushButton("New chat")
         self._new_chat_button.clicked.connect(self._on_new_chat_clicked)
@@ -603,20 +629,37 @@ class MainWindow(QMainWindow):
     def _on_speech_started(self) -> None:
         """Speech playback started."""
         self._status_label.setText("Core: running | Speaking…")
+        self._stop_speaking_button.setEnabled(True)
+
+    def _clear_speaking_status(self) -> None:
+        """Restore the normal status line after speech ended."""
+        state = "Streaming…" if self._streaming else "Idle"
+        self._status_label.setText(f"Core: running | {state}")
 
     @Slot()
     def _on_speech_finished(self) -> None:
         """Speech playback finished."""
-        if self._streaming:
-            self._status_label.setText("Core: running | Streaming…")
-        else:
-            self._status_label.setText("Core: running | Idle")
+        self._stop_speaking_button.setEnabled(False)
+        self._clear_speaking_status()
 
     @Slot(str, str)
     def _on_speech_error(self, kind: str, message: str) -> None:
         """Speech playback error."""
+        self._stop_speaking_button.setEnabled(False)
+        self._clear_speaking_status()
         self._append_error(kind, message)
         self._output_label.setText(f"Speech error: {kind}")
+
+    @Slot(bool)
+    def _on_speak_toggled(self, checked: bool) -> None:
+        """Apply the session speech setting to the core service."""
+        self._core.set_speech_enabled_sync(checked)
+
+    @Slot()
+    def _on_stop_speaking_clicked(self) -> None:
+        """Stop the current speech from the UI thread."""
+        self._stop_speaking_button.setEnabled(False)
+        self._core.stop_speaking()
 
     @Slot(str)
     def _on_speech_notice(self, message: str) -> None:
@@ -948,6 +991,7 @@ class MainWindow(QMainWindow):
         self._send_button.setEnabled(False)
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
+        self._stop_speaking_button.setEnabled(False)
 
     def set_core_failed(self, message: str) -> None:
         """Mark the core as failed and disable core-dependent controls."""
@@ -959,12 +1003,14 @@ class MainWindow(QMainWindow):
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
         self._conversation_list.setEnabled(False)
+        self._stop_speaking_button.setEnabled(False)
+        self._speak_checkbox.setEnabled(False)
 
     def closeEvent(self, event) -> None:
         """Deny pending requests and stop the core on window close."""
         self._close_confirm_dialog()
         # Stop any ongoing speech before tearing the core down.
-        self._core.request_speech_stop()
+        self._core.stop_speaking()
         self._ui_bridge.shutdown()
         self._core.stop()
         event.accept()

@@ -251,6 +251,12 @@ class CoreService:
         self._tool_registry = tool_registry
         self._tool_audit = tool_audit_repository
         self._speech_queue: SpeechQueue | None = None
+        # Runtime speech switch: the single source of truth for speaking.
+        # Initialized from config, then changed only by set_speech_enabled*.
+        self._speech_enabled = bool(
+            settings.voice.speak_replies if settings is not None else False
+        )
+        self._speech_enabled_explicit = False
         self._turn_tainted = False
 
     @property
@@ -270,6 +276,18 @@ class CoreService:
     def history(self) -> tuple[Message, ...]:
         """Return the in-memory conversation history."""
         return tuple(self._history)
+
+    @property
+    def speech_enabled(self) -> bool:
+        """Return the runtime speech switch (initialized from config)."""
+        return self._speech_enabled
+
+    @property
+    def speech_engine(self) -> str:
+        """Return the configured speech engine name."""
+        if self._settings is not None:
+            return self._settings.voice.engine
+        return "edge"
 
     def start(self) -> None:
         """Start the core service in a dedicated thread."""
@@ -588,9 +606,9 @@ class CoreService:
             return self._speech_queue
         if self._settings is None:
             return None
-        voice_settings = self._settings.voice
-        if not voice_settings.speak_replies:
+        if not self._speech_enabled:
             return None
+        voice_settings = self._settings.voice
 
         from friday.voice import create_engine
 
@@ -619,8 +637,8 @@ class CoreService:
         if self._settings is None:
             return
         voice_settings = self._settings.voice
-        if not voice_settings.speak_replies:
-            logger.info("Speech skipped: speak_replies=false")
+        if not self._speech_enabled:
+            logger.info("Speech skipped: runtime speech switch is off")
             return
 
         # Privacy rule: if the turn used an untrusted tool (e.g., read_clipboard)
@@ -670,13 +688,11 @@ class CoreService:
             await self._speech_queue.stop()
 
     async def set_speech_enabled(self, enabled: bool) -> None:
-        """Enable or disable speech output at runtime."""
+        """Set the runtime speech switch (session only; config is untouched)."""
         if self._settings is None:
             return
-        voice_settings = self._settings.voice
-        if voice_settings.speak_replies == enabled:
-            return
-        voice_settings.speak_replies = enabled
+        self._speech_enabled = enabled
+        self._speech_enabled_explicit = True
         if enabled:
             self._ensure_speech_queue()
         else:
@@ -684,7 +700,14 @@ class CoreService:
             self._speech_queue = None
 
     def set_speech_enabled_sync(self, enabled: bool) -> None:
-        """Toggle speech from the UI thread without blocking it."""
+        """Toggle speech from the UI thread without blocking it.
+
+        The runtime flag changes immediately so a reply that is already being
+        scheduled follows the new setting; queue work is scheduled on the core
+        loop.
+        """
+        self._speech_enabled = enabled
+        self._speech_enabled_explicit = True
         loop = self._loop
         if loop is None or not loop.is_running():
             return
@@ -699,9 +722,13 @@ class CoreService:
                 self.set_speech_enabled(enabled), loop
             )
 
-    def request_speech_stop(self) -> None:
+    def stop_speaking(self) -> None:
         """Stop speech from the UI thread without blocking it."""
         self._request_speech_stop()
+
+    def request_speech_stop(self) -> None:
+        """Deprecated alias for :meth:`stop_speaking`."""
+        self.stop_speaking()
 
     def _request_speech_stop(self) -> None:
         """Ask the queue to stop without blocking the calling thread.
@@ -1109,6 +1136,9 @@ class CoreService:
 
         if self._settings is None:
             self._settings = load_settings()
+        if not self._speech_enabled_explicit:
+            # Settings loaded lazily: adopt the config default once.
+            self._speech_enabled = self._settings.voice.speak_replies
         self._provider = OpenAICompatProvider(
             self._settings.provider,
             self._secrets,
