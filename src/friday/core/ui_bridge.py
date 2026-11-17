@@ -48,7 +48,8 @@ class DenyingUIBridge:
         return None
 
     async def play_audio(self, path: str) -> None:
-        return None
+        from friday.voice.errors import PlaybackNotAvailable
+        raise PlaybackNotAvailable("No audio player attached")
 
     async def stop_audio(self) -> None:
         return None

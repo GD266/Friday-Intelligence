@@ -251,6 +251,7 @@ class CoreService:
         self._tool_registry = tool_registry
         self._tool_audit = tool_audit_repository
         self._speech_queue: SpeechQueue | None = None
+        self._turn_tainted = False
 
     @property
     def signals(self) -> CoreSignals:
@@ -302,11 +303,7 @@ class CoreService:
 
         logger.info("Stopping core service...")
         self._deny_pending_confirmations()
-        self._stop_speech_sync()
-
-        # Schedule stop on the event loop
-        if self._stop_event:
-            self._loop.call_soon_threadsafe(self._stop_event.set)
+        self._stop_speech_before_shutdown()
 
         # Wait for thread to finish
         if self._thread and self._thread.is_alive():
@@ -332,7 +329,7 @@ class CoreService:
         """Cancel the in-flight chat request, if any."""
         if not self._running or self._loop is None:
             return
-        self._stop_speech_sync()
+        self._request_speech_stop()
         self._loop.call_soon_threadsafe(self._cancel_chat)
 
     def clear_chat(self) -> None:
@@ -341,14 +338,14 @@ class CoreService:
             self._history.clear()
             self._current_conversation_id = 0
             return
-        self._stop_speech_sync()
+        self._request_speech_stop()
         self._loop.call_soon_threadsafe(self._clear_chat)
 
     def open_conversation(self, conversation_id: int) -> None:
         """Open a persisted conversation from the UI thread."""
         if not self._running or self._loop is None:
             raise RuntimeError("Core service not running")
-        self._stop_speech_sync()
+        self._request_speech_stop()
         self._loop.call_soon_threadsafe(
             self._open_conversation, conversation_id
         )
@@ -357,7 +354,7 @@ class CoreService:
         """Start an empty, unsaved conversation from the UI thread."""
         if not self._running or self._loop is None:
             raise RuntimeError("Core service not running")
-        self._stop_speech_sync()
+        self._request_speech_stop()
         self._loop.call_soon_threadsafe(self._new_conversation)
 
     def rename_conversation(self, conversation_id: int, title: str) -> None:
@@ -416,7 +413,18 @@ class CoreService:
         self._loop.call_soon_threadsafe(self._search_chats, query)
 
     def set_ui_bridge(self, bridge: UIBridge) -> None:
-        """Attach the UI bridge used for confirmations and clipboard reads."""
+        """Attach the UI bridge used for confirmations, clipboard reads,
+        and audio playback.
+
+        Runs on the UI thread. Any in-flight speech is stopped on the core
+        loop without waiting, because ``SpeechQueue.stop()`` awaits the
+        bridge (which needs this thread); a blocking wait here can freeze
+        the window until the timeout.
+        """
+        queue = self._speech_queue
+        loop = self._loop
+        if queue is not None and loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(queue.stop(), loop)
         self._ui_bridge = bridge
 
     def confirm_response(self, request_id: str, approved: bool) -> None:
@@ -456,13 +464,13 @@ class CoreService:
                 "Wait for it to finish or press Stop.",
             )
             return
+        # A new message replaces any speech still playing from the last reply.
+        self._request_speech_stop()
         self._chat_task = asyncio.ensure_future(self._run_chat(text))
 
     def _cancel_chat(self) -> None:
         self._deny_pending_confirmations()
-        # This runs on the core thread, so we can create a task for the async stop
-        if self._speech_queue and self._loop:
-            asyncio.run_coroutine_threadsafe(self.stop_speech(), self._loop)
+        self._request_speech_stop()
         task = self._chat_task
         if task is not None and not task.done():
             task.cancel()
@@ -481,8 +489,7 @@ class CoreService:
         task = self._chat_task
         if task is not None and not task.done():
             task.cancel()
-        if self._speech_queue and self._loop:
-            asyncio.run_coroutine_threadsafe(self.stop_speech(), self._loop)
+        self._request_speech_stop()
         self._history.clear()
         self._current_conversation_id = 0
 
@@ -567,59 +574,87 @@ class CoreService:
         else:
             self._signals.conversation_opened.emit(0, [])
 
-        # Initialize speech queue after memory is ready
-        self._init_speech_queue()
+        # Create the speech queue once, after memory is ready, and only when
+        # voice output is enabled. It is reused for every reply.
+        self._ensure_speech_queue()
 
-    def _init_speech_queue(self) -> None:
-        """Initialize the speech queue with configured engine and settings."""
+    def _ensure_speech_queue(self) -> "SpeechQueue | None":
+        """Return the speech queue, creating it on first use.
+
+        No engine is constructed here; the engine factory only runs when a
+        sentence is actually synthesized.
+        """
+        if self._speech_queue is not None:
+            return self._speech_queue
         if self._settings is None:
-            return
+            return None
         voice_settings = self._settings.voice
         if not voice_settings.speak_replies:
-            return
+            return None
 
         from friday.voice import create_engine
 
         def engine_factory(name: str) -> "TTSEngine":
             return create_engine(name)
 
+        def get_bridge() -> "UIBridge":
+            return self._ui_bridge
+
         self._speech_queue = SpeechQueue(
             engine_factory=engine_factory,
-            bridge=self._ui_bridge,
+            get_bridge=get_bridge,
             tmp_dir=voice_settings.tmp_dir,
             on_started=self._signals.speech_started.emit,
             on_finished=self._signals.speech_finished.emit,
             on_error=lambda kind, msg: self._signals.speech_error.emit(kind, msg),
             on_notice=lambda msg: self._signals.speech_notice.emit(msg),
         )
+        return self._speech_queue
 
     def _speak_final_response(self, text: str) -> None:
         """Speak the final assistant response if voice is enabled."""
-        if self._speech_queue is None:
+        if self._settings is None:
             return
         voice_settings = self._settings.voice
         if not voice_settings.speak_replies:
+            logger.info("Speech skipped: speak_replies=false")
             return
 
         # Privacy rule: if the turn used an untrusted tool (e.g., read_clipboard)
         # and the engine is online (edge), do NOT speak the response.
         if voice_settings.engine == "edge" and self._turn_tainted:
+            logger.info("Speech skipped: tainted turn with online engine (edge)")
             self._signals.speech_notice.emit(
                 "Not spoken: reply may contain clipboard text (online voice)"
             )
             return
 
+        queue = self._ensure_speech_queue()
+        if queue is None:
+            logger.info("Speech skipped: queue not available")
+            return
+
         try:
             sentences = prepare_and_split(text, voice_settings.max_spoken_chars)
         except ValueError:
+            logger.info("Speech skipped: text empty after preparation")
             return
+
+        logger.info(
+            "Speech enabled: engine=%s voice=%s rate=%d%% sentences=%d total_chars=%d",
+            voice_settings.engine,
+            voice_settings.voice_name or "(default)",
+            voice_settings.rate_percent,
+            len(sentences),
+            sum(len(s) for s in sentences),
+        )
 
         voice_name = voice_settings.voice_name
         rate = voice_settings.rate_percent
         engine_name = voice_settings.engine
 
         for sentence in sentences:
-            self._speech_queue.enqueue(
+            queue.enqueue(
                 text=sentence,
                 voice=voice_name,
                 rate_percent=rate,
@@ -640,24 +675,76 @@ class CoreService:
             return
         voice_settings.speak_replies = enabled
         if enabled:
-            # Create queue lazily if it doesn't exist
-            if self._speech_queue is None:
-                self._init_speech_queue()
+            self._ensure_speech_queue()
         else:
-            # Disable: stop and destroy queue
             await self.stop_speech()
             self._speech_queue = None
 
-    def _stop_speech_sync(self) -> None:
-        """Synchronously stop speech from the UI thread."""
-        if self._speech_queue and self._loop:
-            # Schedule the async stop on the core thread
-            fut = asyncio.run_coroutine_threadsafe(self.stop_speech(), self._loop)
-            # Wait with timeout to avoid blocking UI thread
+    def set_speech_enabled_sync(self, enabled: bool) -> None:
+        """Toggle speech from the UI thread without blocking it."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            asyncio.create_task(self.set_speech_enabled(enabled))
+        else:
+            asyncio.run_coroutine_threadsafe(
+                self.set_speech_enabled(enabled), loop
+            )
+
+    def request_speech_stop(self) -> None:
+        """Stop speech from the UI thread without blocking it."""
+        self._request_speech_stop()
+
+    def _request_speech_stop(self) -> None:
+        """Ask the queue to stop without blocking the calling thread.
+
+        Safe from the UI thread (schedules on the core loop) and from the
+        core thread (creates a task on the running loop).
+        """
+        queue = self._speech_queue
+        loop = self._loop
+        if queue is None or loop is None or not loop.is_running():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            asyncio.create_task(queue.stop())
+        else:
+            asyncio.run_coroutine_threadsafe(queue.stop(), loop)
+
+    def _stop_speech_before_shutdown(self) -> None:
+        """Stop speech on the core loop, then signal the loop to exit.
+
+        Called from the UI thread during shutdown. Does not wait for a
+        future; the caller joins the core thread instead.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        stop_event = self._stop_event
+        queue = self._speech_queue
+        if queue is None:
+            if stop_event is not None:
+                loop.call_soon_threadsafe(stop_event.set)
+            return
+
+        async def shutdown_speech() -> None:
             try:
-                fut.result(timeout=2.0)
+                await queue.stop()
             except Exception:
-                pass
+                logger.exception("Failed to stop speech during shutdown")
+            finally:
+                if stop_event is not None:
+                    stop_event.set()
+
+        asyncio.run_coroutine_threadsafe(shutdown_speech(), loop)
 
     def _emit_facts(self) -> None:
         try:
@@ -773,8 +860,6 @@ class CoreService:
             )
             return
 
-        if self._speech_queue and self._loop:
-            asyncio.run_coroutine_threadsafe(self.stop_speech(), self._loop)
         try:
             repository = self._require_repository()
             repository.get_conversation(conversation_id)
@@ -803,8 +888,6 @@ class CoreService:
                 "Press Stop before starting a new conversation.",
             )
             return
-        if self._speech_queue and self._loop:
-            asyncio.run_coroutine_threadsafe(self.stop_speech(), self._loop)
         self._current_conversation_id = 0
         self._history.clear()
         self._signals.conversation_opened.emit(0, [])
@@ -1425,7 +1508,7 @@ class CoreService:
                 ui_bridge=self._ui_bridge,
                 conversation_id=conversation_id or None,
             )
-            # Track whether this turn used any untrusted tools (for privacy rule)
+            # Track whether this turn used untrusted tools (privacy rule).
             self._turn_tainted = False
 
             for iteration in range(max_iterations):
@@ -1457,7 +1540,8 @@ class CoreService:
                             Message(ROLE_ASSISTANT, iteration_text)
                         )
                     self._signals.message_done.emit(iteration_text)
-                    # Speak the final response if voice is enabled
+                    # Speak the final response if voice is enabled.
+                    self._turn_tainted = turn_state.tainted
                     self._speak_final_response(iteration_text)
                     return
 

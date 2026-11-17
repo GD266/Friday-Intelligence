@@ -40,6 +40,7 @@ from friday.memory.conversations import (
 )
 from friday.memory.facts import Fact
 from friday.memory.search import SearchResult
+from friday.ui.audio_player import AudioPlayer
 from friday.ui.confirm_dialog import ConfirmDialog
 from friday.ui.memory_dialog import MemoryDialog
 from friday.ui.tools_dialog import ToolsDialog
@@ -106,6 +107,14 @@ class MainWindow(QMainWindow):
         self._core.set_ui_bridge(self._ui_bridge)
         self._ui_bridge.clipboard_requested.connect(
             self._on_clipboard_requested
+        )
+        # Create AudioPlayer and connect bridge signals
+        self._audio_player = AudioPlayer(self)
+        self._ui_bridge.play_audio_requested.connect(self._on_play_audio_requested)
+        self._ui_bridge.stop_audio_requested.connect(self._audio_player.stop)
+        self._audio_player.play_finished.connect(self._ui_bridge.resolve_audio)
+        self._audio_player.play_error.connect(
+            lambda req_id, kind, msg: self._ui_bridge.resolve_audio(req_id, kind, msg)
         )
         self._setup_ui()
         self._connect_signals()
@@ -255,6 +264,11 @@ class MainWindow(QMainWindow):
         self._core.signals.confirm_requested.connect(
             self._on_confirm_requested
         )
+        # Speech signals
+        self._core.signals.speech_started.connect(self._on_speech_started)
+        self._core.signals.speech_finished.connect(self._on_speech_finished)
+        self._core.signals.speech_error.connect(self._on_speech_error)
+        self._core.signals.speech_notice.connect(self._on_speech_notice)
 
     # ------------------------------------------------------------------
     # Transcript helpers
@@ -579,6 +593,36 @@ class MainWindow(QMainWindow):
         except Exception:
             text = None
         self._ui_bridge.resolve_clipboard(request_id, text)
+
+    @Slot(str, str)
+    def _on_play_audio_requested(self, request_id: str, path: str) -> None:
+        """Handle play audio request from the bridge."""
+        self._audio_player.play(path, request_id)
+
+    @Slot()
+    def _on_speech_started(self) -> None:
+        """Speech playback started."""
+        self._status_label.setText("Core: running | Speaking…")
+
+    @Slot()
+    def _on_speech_finished(self) -> None:
+        """Speech playback finished."""
+        if self._streaming:
+            self._status_label.setText("Core: running | Streaming…")
+        else:
+            self._status_label.setText("Core: running | Idle")
+
+    @Slot(str, str)
+    def _on_speech_error(self, kind: str, message: str) -> None:
+        """Speech playback error."""
+        self._append_error(kind, message)
+        self._output_label.setText(f"Speech error: {kind}")
+
+    @Slot(str)
+    def _on_speech_notice(self, message: str) -> None:
+        """Speech notice (e.g., privacy skip)."""
+        self._append_notice(message)
+        self._output_label.setText(message)
 
     def _close_confirm_dialog(self) -> None:
         dialog = self._confirm_dialog
@@ -919,6 +963,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """Deny pending requests and stop the core on window close."""
         self._close_confirm_dialog()
+        # Stop any ongoing speech before tearing the core down.
+        self._core.request_speech_stop()
         self._ui_bridge.shutdown()
         self._core.stop()
         event.accept()

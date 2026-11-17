@@ -65,6 +65,12 @@ class TTSEmptyText(TTSError):
     kind = "TTSEmptyText"
 
 
+class PlaybackNotAvailable(TTSError):
+    """No audio player is attached to the UI bridge."""
+
+    kind = "PlaybackNotAvailable"
+
+
 def build_tts_http_error(
     status_code: int,
     body: str,
@@ -101,6 +107,7 @@ __all__ = [
     "TTSTimeout",
     "TTSBadVoice",
     "TTSEmptyText",
+    "PlaybackNotAvailable",
     "build_tts_http_error",
     "sanitize_provider_message",
 ]
