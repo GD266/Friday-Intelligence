@@ -71,6 +71,46 @@ class PlaybackNotAvailable(TTSError):
     kind = "PlaybackNotAvailable"
 
 
+class AudioCaptureError(Exception):
+    """Base class for microphone capture failures."""
+
+    kind = "AudioCaptureError"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class NoInputDevice(AudioCaptureError):
+    """No microphone input device is available."""
+
+    kind = "NoInputDevice"
+
+
+class InputDeviceNotFound(AudioCaptureError):
+    """The configured microphone name did not match any device."""
+
+    kind = "InputDeviceNotFound"
+
+
+class MicPermissionOrSilent(AudioCaptureError):
+    """The microphone produced only silence (permission or mute)."""
+
+    kind = "MicPermissionOrSilent"
+
+
+class RecordingTooShort(AudioCaptureError):
+    """The recording was shorter than the configured minimum."""
+
+    kind = "RecordingTooShort"
+
+
+class RecordingError(AudioCaptureError):
+    """The recording could not be started or decoded."""
+
+    kind = "RecordingError"
+
+
 def build_tts_http_error(
     status_code: int,
     body: str,
@@ -108,6 +148,12 @@ __all__ = [
     "TTSBadVoice",
     "TTSEmptyText",
     "PlaybackNotAvailable",
+    "AudioCaptureError",
+    "NoInputDevice",
+    "InputDeviceNotFound",
+    "MicPermissionOrSilent",
+    "RecordingTooShort",
+    "RecordingError",
     "build_tts_http_error",
     "sanitize_provider_message",
 ]

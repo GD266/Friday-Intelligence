@@ -94,6 +94,10 @@ class VoiceSettings(BaseModel):
     max_spoken_chars: int = Field(default=1200, ge=1)
     tmp_dir: str = ""
     prefetch_sentences: int = Field(default=2, ge=1, le=4)
+    input_device: str = ""
+    max_record_seconds: int = Field(default=30, ge=1, le=60)
+    min_record_seconds: float = Field(default=0.3, gt=0, le=60)
+    silence_peak_threshold: float = Field(default=0.01, ge=0, le=1)
 
     @field_validator("tmp_dir")
     @classmethod
@@ -225,6 +229,10 @@ rate_percent = 0
 max_spoken_chars = 1200
 tmp_dir = ""
 prefetch_sentences = 2
+input_device = ""
+max_record_seconds = 30
+min_record_seconds = 0.3
+silence_peak_threshold = 0.01
 """.strip()
 
 
@@ -344,6 +352,13 @@ def _apply_env_overrides(data: dict) -> dict:
         "FRIDAY_VOICE__MAX_SPOKEN_CHARS": ("voice", "max_spoken_chars"),
         "FRIDAY_VOICE__TMP_DIR": ("voice", "tmp_dir"),
         "FRIDAY_VOICE__PREFETCH_SENTENCES": ("voice", "prefetch_sentences"),
+        "FRIDAY_VOICE__INPUT_DEVICE": ("voice", "input_device"),
+        "FRIDAY_VOICE__MAX_RECORD_SECONDS": ("voice", "max_record_seconds"),
+        "FRIDAY_VOICE__MIN_RECORD_SECONDS": ("voice", "min_record_seconds"),
+        "FRIDAY_VOICE__SILENCE_PEAK_THRESHOLD": (
+            "voice",
+            "silence_peak_threshold",
+        ),
     }
 
     result = data.copy()
@@ -373,6 +388,9 @@ def _apply_env_overrides(data: dict) -> dict:
                 "rate_percent",
                 "max_spoken_chars",
                 "prefetch_sentences",
+                "max_record_seconds",
+                "min_record_seconds",
+                "silence_peak_threshold",
             ):
                 is_float = key in (
                     "ping_timeout",
@@ -380,6 +398,8 @@ def _apply_env_overrides(data: dict) -> dict:
                     "read_timeout_seconds",
                     "tool_timeout_seconds",
                     "confirm_timeout_seconds",
+                    "min_record_seconds",
+                    "silence_peak_threshold",
                 )
                 value = float(value) if is_float else int(value)
 

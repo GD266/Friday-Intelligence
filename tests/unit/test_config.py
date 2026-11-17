@@ -137,6 +137,32 @@ class TestConfigDefaults:
         with pytest.raises(ValueError):
             VoiceSettings(prefetch_sentences=5)
 
+    def test_voice_record_settings_bounds(self) -> None:
+        """Recording settings have safe defaults and reject bad values."""
+        voice = VoiceSettings()
+        assert voice.input_device == ""
+        assert voice.max_record_seconds == 30
+        assert voice.min_record_seconds == 0.3
+        assert voice.silence_peak_threshold == 0.01
+
+        assert VoiceSettings(max_record_seconds=1).max_record_seconds == 1
+        assert VoiceSettings(max_record_seconds=60).max_record_seconds == 60
+        with pytest.raises(ValueError):
+            VoiceSettings(max_record_seconds=0)
+        with pytest.raises(ValueError):
+            VoiceSettings(max_record_seconds=61)
+
+        assert VoiceSettings(min_record_seconds=0.1).min_record_seconds == 0.1
+        with pytest.raises(ValueError):
+            VoiceSettings(min_record_seconds=0)
+        with pytest.raises(ValueError):
+            VoiceSettings(min_record_seconds=61)
+
+        with pytest.raises(ValueError):
+            VoiceSettings(silence_peak_threshold=-0.01)
+        with pytest.raises(ValueError):
+            VoiceSettings(silence_peak_threshold=1.01)
+
     def test_env_override(self, monkeypatch):
         """Test environment variable override."""
         with tempfile.TemporaryDirectory() as tmpdir:

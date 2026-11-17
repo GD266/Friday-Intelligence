@@ -63,7 +63,7 @@ class AudioPlayer(QObject):
         self._current_request_id = None
 
     def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if status.value == QMediaPlayer.MediaStatus.EndOfMedia.value:
             request_id = self._current_request_id
             self._cleanup_after_playback()
             if request_id:
