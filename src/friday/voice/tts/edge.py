@@ -9,6 +9,7 @@ from pathlib import Path
 
 import edge_tts
 
+from friday.config.settings import get_default_voice_tmp_dir
 from friday.voice.errors import (
     TTSBadVoice,
     TTSNetworkError,
@@ -39,9 +40,14 @@ class EdgeTTSEngine(TTSEngine):
         *,
         timeout: float = DEFAULT_TIMEOUT,
         proxy: str | None = None,
+        tmp_dir: str = "",
     ) -> None:
         self._timeout = timeout
         self._proxy = proxy
+        self._tmp_dir = (
+            Path(tmp_dir) if tmp_dir else Path(get_default_voice_tmp_dir())
+        )
+        self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._voices_cache: list[Voice] | None = None
 
     async def list_voices(self) -> list[Voice]:
@@ -115,7 +121,9 @@ class EdgeTTSEngine(TTSEngine):
         rate_str = f"{rate:+d}%"
 
         # Create temp file for output
-        fd, tmp_path = tempfile.mkstemp(suffix=".mp3", prefix="friday_tts_")
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".mp3", prefix="friday_tts_", dir=str(self._tmp_dir)
+        )
         os.close(fd)
         tmp_path = Path(tmp_path)
 

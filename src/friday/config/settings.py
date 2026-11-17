@@ -74,6 +74,16 @@ class UISettings(BaseModel):
     theme: str = "system"
 
 
+def get_default_voice_tmp_dir() -> str:
+    """Return the spec TTS temp directory (%LOCALAPPDATA%\\Friday\\tmp\\tts)."""
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        base = Path(local)
+    else:  # Windows only; keep a sane fallback for tests.
+        base = Path.home() / "AppData" / "Local"
+    return str(base / "Friday" / "tmp" / "tts")
+
+
 class VoiceSettings(BaseModel):
     """Voice output (TTS) settings."""
 
@@ -83,6 +93,7 @@ class VoiceSettings(BaseModel):
     rate_percent: int = Field(default=0, ge=-50, le=50)
     max_spoken_chars: int = Field(default=1200, ge=1)
     tmp_dir: str = ""
+    prefetch_sentences: int = Field(default=2, ge=1, le=4)
 
     @field_validator("tmp_dir")
     @classmethod
@@ -213,6 +224,7 @@ voice_name = ""
 rate_percent = 0
 max_spoken_chars = 1200
 tmp_dir = ""
+prefetch_sentences = 2
 """.strip()
 
 
@@ -331,6 +343,7 @@ def _apply_env_overrides(data: dict) -> dict:
         "FRIDAY_VOICE__RATE_PERCENT": ("voice", "rate_percent"),
         "FRIDAY_VOICE__MAX_SPOKEN_CHARS": ("voice", "max_spoken_chars"),
         "FRIDAY_VOICE__TMP_DIR": ("voice", "tmp_dir"),
+        "FRIDAY_VOICE__PREFETCH_SENTENCES": ("voice", "prefetch_sentences"),
     }
 
     result = data.copy()
@@ -359,6 +372,7 @@ def _apply_env_overrides(data: dict) -> dict:
                 "confirm_timeout_seconds",
                 "rate_percent",
                 "max_spoken_chars",
+                "prefetch_sentences",
             ):
                 is_float = key in (
                     "ping_timeout",

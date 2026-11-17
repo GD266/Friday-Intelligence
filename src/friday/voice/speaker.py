@@ -1,13 +1,14 @@
-"""Queue-based TTS playback pipeline (no Qt dependencies)."""
+"""Queue-based TTS playback pipeline with bounded synthesis prefetch."""
 
 from __future__ import annotations
 
 import asyncio
-import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from friday.config.settings import get_default_voice_tmp_dir
 from friday.core.logging import get_logger
 from friday.core.ui_bridge import UIBridge
 from friday.voice.tts.base import SynthesisResult, TTSEngine
@@ -20,6 +21,19 @@ DEFAULT_PLAYBACK_TIMEOUT = 60.0
 # Maximum time stop() waits for the UI to acknowledge an audio stop.
 STOP_AUDIO_TIMEOUT = 5.0
 
+# Bounded prefetch: clips synthesized but not yet played.
+DEFAULT_PREFETCH_SENTENCES = 2
+MAX_PREFETCH_SENTENCES = 4
+
+# Sentinels passed from the producer to the consumer over ``_ready``.
+_PRODUCER_DONE = object()
+_PRODUCER_FAILED = object()
+
+
+def default_tmp_dir() -> Path:
+    """Return the spec TTS temp directory (%LOCALAPPDATA%\\Friday\\tmp\\tts)."""
+    return Path(get_default_voice_tmp_dir())
+
 
 @dataclass
 class SpeechTask:
@@ -30,15 +44,19 @@ class SpeechTask:
     rate_percent: int
     engine_name: str
     generation: int = 0
+    enqueued_at: float = 0.0
 
 
 class SpeechQueue:
     """
-    Queue-based TTS playback.
+    Queue-based TTS playback with bounded synthesis prefetch.
 
-    - Tasks are synthesized and played in the order they were enqueued
-    - stop() clears pending tasks, cancels in-flight work, announces a new
-      generation, and leaves the queue ready for the next reply
+    - A synthesis producer runs ahead of a playback consumer
+    - Playback stays in enqueue order
+    - At most ``prefetch_sentences`` clips are synthesized but not yet played
+    - stop() clears pending tasks, cancels producer and consumer, deletes
+      unplayed audio files, announces a new generation, and leaves the queue
+      ready for the next reply
     - Tasks tagged with an older generation are dropped, never played
     - A reply that has been accepted is either played or reported through
       on_error; it is never silently abandoned
@@ -56,6 +74,7 @@ class SpeechQueue:
         get_bridge: Callable[[], "UIBridge"],
         *,
         tmp_dir: str = "",
+        prefetch_sentences: int = DEFAULT_PREFETCH_SENTENCES,
         on_started: Callable[[], None] | None = None,
         on_finished: Callable[[], None] | None = None,
         on_error: Callable[[str, str], None] | None = None,
@@ -64,15 +83,26 @@ class SpeechQueue:
     ) -> None:
         self._engine_factory = engine_factory
         self._get_bridge = get_bridge
-        self._tmp_dir = (
-            Path(tmp_dir) if tmp_dir else Path(tempfile.gettempdir()) / "friday_tts"
-        )
+        self._tmp_dir = Path(tmp_dir) if tmp_dir else default_tmp_dir()
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self._queue: asyncio.Queue[SpeechTask] = asyncio.Queue()
+        # Snapshot of the reply currently being processed. Tasks enqueued
+        # while it plays (the next reply) stay in ``_queue``.
+        self._batch: asyncio.Queue[SpeechTask] = asyncio.Queue()
+        self._ready: asyncio.Queue[object] = asyncio.Queue()
+        self._slots: asyncio.Semaphore = asyncio.Semaphore(
+            self._clamp_prefetch(prefetch_sentences)
+        )
+        self._prefetch = self._clamp_prefetch(prefetch_sentences)
         self._process_task: asyncio.Task | None = None
+        self._producer_task: asyncio.Task | None = None
+        self._consumer_task: asyncio.Task | None = None
         self._generation = 0
         self._playback_timeout = playback_timeout
+        self._prev_play_finished_at: float | None = None
+        self._first_audio_logged = False
+        self._reply_failed = False
 
         # Callbacks
         self._on_started = on_started
@@ -84,8 +114,14 @@ class SpeechQueue:
         self._purge_tmp_dir()
 
         logger.info(
-            "SpeechQueue initialized: playback_timeout=%.1fs", playback_timeout
+            "SpeechQueue initialized: playback_timeout=%.1fs prefetch=%d",
+            playback_timeout,
+            self._prefetch,
         )
+
+    @staticmethod
+    def _clamp_prefetch(value: int) -> int:
+        return max(1, min(MAX_PREFETCH_SENTENCES, int(value)))
 
     @property
     def generation(self) -> int:
@@ -122,6 +158,7 @@ class SpeechQueue:
             rate_percent=rate_percent,
             engine_name=engine_name,
             generation=self._generation,
+            enqueued_at=time.perf_counter(),
         )
         self._queue.put_nowait(task)
         logger.info(
@@ -147,8 +184,9 @@ class SpeechQueue:
         """Stop playback and make the queue ready for the next reply.
 
         Increments the generation so work tagged with the old generation is
-        dropped, clears pending tasks, cancels in-flight synthesis/playback,
-        and stops the UI player. The queue stays usable afterwards.
+        dropped, clears pending tasks, cancels the producer and the consumer,
+        deletes any synthesized-but-unplayed files, and stops the UI player.
+        The queue stays usable afterwards.
         """
         logger.info("speech_stop_requested")
         self._generation += 1
@@ -162,18 +200,9 @@ class SpeechQueue:
                 generation,
             )
 
-        await self._cancel_current_work()
-
-        process_task = self._process_task
-        self._process_task = None
-        if process_task is not None and not process_task.done():
-            process_task.cancel()
-            try:
-                await process_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("speech processor failed during stop")
+        await self._cancel_pipeline()
+        self._delete_ready_files()
+        await self._stop_audio()
 
         logger.info("speech_stop_completed: generation=%d", generation)
         # A reply may have been accepted while stop() was awaiting. It must
@@ -181,19 +210,65 @@ class SpeechQueue:
         if not self._queue.empty():
             self._ensure_processor()
 
+    async def shutdown(self) -> None:
+        """Stop work and purge the TTS temp directory (called at exit)."""
+        await self.stop()
+        self._purge_tmp_dir()
+
     def _discard_pending(self) -> int:
         """Drop every queued task and return how many were discarded."""
         dropped = 0
+        for queue in (self._queue, self._batch):
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    dropped += 1
+        return dropped
+
+    def _delete_ready_files(self) -> None:
+        """Delete audio files that were synthesized but never played."""
+        deleted = 0
         while True:
             try:
-                self._queue.get_nowait()
+                item = self._ready.get_nowait()
             except asyncio.QueueEmpty:
-                return dropped
-            else:
-                dropped += 1
+                break
+            if isinstance(item, tuple):
+                self._remove_audio(item[1])
+                deleted += 1
+        if deleted:
+            logger.info("speech deleted: unplayed files=%d", deleted)
 
-    async def _cancel_current_work(self) -> None:
-        """Stop the UI player before cancelling the queue processor."""
+    async def _cancel_pipeline(self) -> None:
+        """Cancel the producer and consumer, then the supervisor."""
+        producer = self._producer_task
+        consumer = self._consumer_task
+        supervisor = self._process_task
+        self._producer_task = None
+        self._consumer_task = None
+        self._process_task = None
+
+        tasks = [
+            task
+            for task in (producer, consumer, supervisor)
+            if task is not None
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("speech task failed during stop")
+
+    async def _stop_audio(self) -> None:
+        """Tell the UI player to stop (bounded wait)."""
         logger.info("cancelled: trigger=stop")
         try:
             bridge = self._get_bridge()
@@ -214,7 +289,7 @@ class SpeechQueue:
             logger.warning("speech queue did not drain within %.1fs", timeout)
 
     async def _process_queue(self) -> None:
-        """Process accepted tasks in order until the queue is empty."""
+        """Supervise one producer/consumer pass per reply batch."""
         logger.info(
             "queue_task_started: queued=%d generation=%d",
             self._queue.qsize(),
@@ -222,97 +297,216 @@ class SpeechQueue:
         )
         try:
             while True:
-                task = await self._queue.get()
+                if self._queue.empty():
+                    break
+                # Take the reply as it was queued: this task's whole reply is
+                # enqueued synchronously, so anything added later belongs to
+                # the next reply and must survive a failure here.
+                while True:
+                    try:
+                        self._batch.put_nowait(self._queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                self._ready = asyncio.Queue()
+                self._slots = asyncio.Semaphore(self._prefetch)
+                self._prev_play_finished_at = None
+                self._first_audio_logged = False
+                self._reply_failed = False
+                self._producer_task = asyncio.create_task(self._producer())
+                self._consumer_task = asyncio.create_task(self._consumer())
                 try:
-                    if task.generation != self._generation:
-                        logger.info(
-                            "speech dropped: stale generation task=%d current=%d",
-                            task.generation,
-                            self._generation,
-                        )
-                        continue
-                    await self._run_task(task)
+                    await asyncio.gather(
+                        self._producer_task, self._consumer_task
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    # A bug in the pipeline must still be visible to the UI.
-                    logger.exception("speech task failed")
+                    logger.exception("speech pipeline failed")
+                    self._delete_ready_files()
                     self._emit_error(type(exc).__name__, str(exc))
-                if self._queue.empty():
+                finally:
+                    self._producer_task = None
+                    self._consumer_task = None
+                if self._reply_failed:
+                    # One speech_error was already emitted; the rest of this
+                    # reply was discarded. The queue stays usable.
+                    logger.info(
+                        "speech_reply_stopped: reason=synthesis_error "
+                        "remaining=%d",
+                        self._queue.qsize(),
+                    )
                     break
         except asyncio.CancelledError:
             logger.info("cancelled: trigger=stop processor")
             raise
         finally:
+            self._producer_task = None
+            self._consumer_task = None
             if self._process_task is asyncio.current_task():
                 self._process_task = None
 
         logger.info("queue_task_finished")
+        if not self._queue.empty():
+            # Work arrived while the pass was finishing; keep it moving.
+            self._ensure_processor()
+            return
         if self._on_finished:
             self._on_finished()
 
-    async def _run_task(self, task: SpeechTask) -> None:
-        """Synthesize and play one task, reporting every failure."""
+    async def _producer(self) -> None:
+        """Synthesize ahead of playback, bounded by ``prefetch_sentences``."""
         try:
-            result = await self._synthesize(task)
+            while True:
+                try:
+                    task = self._batch.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                if task.generation != self._generation:
+                    logger.info(
+                        "speech dropped: stale generation task=%d current=%d",
+                        task.generation,
+                        self._generation,
+                    )
+                    continue
+
+                await self._slots.acquire()
+                if task.generation != self._generation:
+                    self._slots.release()
+                    logger.info(
+                        "speech dropped: stale generation task=%d current=%d",
+                        task.generation,
+                        self._generation,
+                    )
+                    continue
+
+                try:
+                    result = await self._synthesize(task)
+                except asyncio.CancelledError:
+                    self._slots.release()
+                    raise
+                except Exception:
+                    self._slots.release()
+                    self._delete_ready_files()
+                    # One error per failed reply; later sentences are not
+                    # synthesized and unplayed files are removed.
+                    self._reply_failed = True
+                    while True:
+                        try:
+                            self._batch.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    await self._ready.put(_PRODUCER_FAILED)
+                    return
+
+                if task.generation != self._generation:
+                    self._slots.release()
+                    self._remove_audio(result)
+                    logger.info(
+                        "speech dropped: stale generation task=%d current=%d",
+                        task.generation,
+                        self._generation,
+                    )
+                    continue
+
+                await self._ready.put((task, result))
+
+            await self._ready.put(_PRODUCER_DONE)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.info(
-                "synthesis_error: kind=%s len=%d",
-                type(exc).__name__,
-                len(task.text),
-            )
-            self._emit_error(type(exc).__name__, str(exc))
-            return
 
-        if task.generation != self._generation:
-            logger.info(
-                "speech dropped: stale generation task=%d current=%d",
-                task.generation,
-                self._generation,
-            )
-            self._remove_audio(result)
-            return
-
+    async def _consumer(self) -> None:
+        """Play synthesized clips in order."""
         try:
-            await self._play(result, task)
+            while True:
+                item = await self._ready.get()
+                if item is _PRODUCER_DONE:
+                    break
+                if item is _PRODUCER_FAILED:
+                    self._delete_ready_files()
+                    break
+                task, result = item
+                # This clip is now playing, so it no longer counts as
+                # synthesized-but-unplayed; let the producer advance.
+                self._slots.release()
+
+                if task.generation != self._generation:
+                    self._remove_audio(result)
+                    logger.info(
+                        "speech dropped: stale generation task=%d current=%d",
+                        task.generation,
+                        self._generation,
+                    )
+                    continue
+
+                await self._play(result, task)
         except asyncio.CancelledError:
+            logger.info("cancelled: trigger=stop consumer")
             raise
-        finally:
-            self._remove_audio(result)
 
     async def _synthesize(self, task: SpeechTask) -> SynthesisResult:
-        """Synthesize a single task's text."""
+        """Synthesize a single task's text and log its duration."""
         logger.info(
             "synthesis_started: engine=%s len=%d generation=%d",
             task.engine_name,
             len(task.text),
             task.generation,
         )
-        engine = self._engine_factory(task.engine_name)
+        started = time.perf_counter()
+        engine: TTSEngine | None = None
         try:
+            engine = self._engine_factory(task.engine_name)
             result = await engine.synthesize(
                 task.text, task.voice, task.rate_percent
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            synth_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "synthesis_error: kind=%s len=%d synth_ms=%.1f",
+                type(exc).__name__,
+                len(task.text),
+                synth_ms,
+            )
+            self._emit_error(type(exc).__name__, str(exc))
+            raise
         finally:
-            await engine.close()
+            if engine is not None:
+                await engine.close()
+        synth_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
-            "synthesis_done: len=%d generation=%d",
+            "synthesis_done: len=%d generation=%d synth_ms=%.1f",
             len(task.text),
             task.generation,
+            synth_ms,
         )
         return result
 
     async def _play(self, result: SynthesisResult, task: SpeechTask) -> None:
-        """Play an audio file through the UI bridge, with a timeout."""
+        """Play an audio file through the UI bridge, with timing and a timeout."""
         audio_path = Path(result.audio_path)
         bridge = self._get_bridge()
+        now = time.perf_counter()
+        gap_ms = (
+            0.0
+            if self._prev_play_finished_at is None
+            else (now - self._prev_play_finished_at) * 1000.0
+        )
+        first_audio_ms: float | None = None
+        if not self._first_audio_logged:
+            first_audio_ms = (now - task.enqueued_at) * 1000.0
+            self._first_audio_logged = True
+
         if self._on_started:
             self._on_started()
         logger.info(
             "play_requested: generation=%d path=%s", task.generation, audio_path
         )
+        if first_audio_ms is not None:
+            logger.info("first_audio: first_audio_ms=%.1f", first_audio_ms)
+
+        started = time.perf_counter()
         try:
             await asyncio.wait_for(
                 bridge.play_audio(str(audio_path)),
@@ -335,6 +529,13 @@ class SpeechQueue:
             self._emit_error(type(exc).__name__, str(exc))
         else:
             logger.info("play_finished: generation=%d", task.generation)
+        finally:
+            play_ms = (time.perf_counter() - started) * 1000.0
+            self._prev_play_finished_at = time.perf_counter()
+            logger.info(
+                "play_timing: gap_ms=%.1f play_ms=%.1f", gap_ms, play_ms
+            )
+            self._remove_audio(result)
 
     @staticmethod
     def _remove_audio(result: SynthesisResult) -> None:
@@ -355,4 +556,4 @@ class SpeechQueue:
             self._on_notice(message)
 
 
-__all__ = ["SpeechQueue", "SpeechTask"]
+__all__ = ["SpeechQueue", "SpeechTask", "default_tmp_dir"]

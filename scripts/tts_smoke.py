@@ -98,11 +98,13 @@ async def main() -> int:
 
     # Play mode - use AudioPlayer
     try:
+        from PySide6.QtCore import QEventLoop, QTimer
         from PySide6.QtWidgets import QApplication
 
         from friday.ui.audio_player import AudioPlayer
 
-        QApplication.instance() or QApplication([])
+        app = QApplication.instance() or QApplication([])
+        assert app is not None
 
         engine = None
         try:
@@ -123,36 +125,48 @@ async def main() -> int:
             )
             print(msg)
 
-            # Play using AudioPlayer
+            # Play using AudioPlayer. Qt needs its own event loop to advance
+            # QMediaPlayer; the asyncio loop does not pump Qt events, so the
+            # old asyncio.Event wait always timed out on a real desktop.
             player = AudioPlayer()
             request_id = "smoke-test-1"
-
-            done_event = asyncio.Event()
-            error_holder: list[Exception] = []
+            qt_loop = QEventLoop()
+            outcome = {"finished": False, "error": "", "timeout": False}
 
             def on_finished(req_id: str) -> None:
                 if req_id == request_id:
-                    done_event.set()
+                    outcome["finished"] = True
+                    qt_loop.quit()
 
             def on_error(req_id: str, kind: str, message: str) -> None:
                 if req_id == request_id:
-                    error_holder.append(Exception(f"{kind}: {message}"))
-                    done_event.set()
+                    outcome["error"] = f"{kind}: {message}"
+                    qt_loop.quit()
+
+            def on_timeout() -> None:
+                outcome["timeout"] = True
+                qt_loop.quit()
 
             player.play_finished.connect(on_finished)
             player.play_error.connect(on_error)
-
+            QTimer.singleShot(30_000, on_timeout)
             player.play(result.audio_path, request_id)
+            qt_loop.exec()
+            player.stop()
 
-            # Wait for playback to finish
-            try:
-                await asyncio.wait_for(done_event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
+            if outcome["timeout"]:
                 print("Error: Playback timed out", file=sys.stderr)
                 return 1
-
-            if error_holder:
-                print(f"Playback error: {error_holder[0]}", file=sys.stderr)
+            if outcome["error"]:
+                print(
+                    f"Playback error: {outcome['error']}", file=sys.stderr
+                )
+                return 1
+            if not outcome["finished"]:
+                print(
+                    "Error: Playback ended without a result",
+                    file=sys.stderr,
+                )
                 return 1
 
             print("OK: played 1 sentence(s)")

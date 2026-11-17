@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from friday.config.settings import get_default_voice_tmp_dir
 from friday.voice.errors import (
     TTSBadVoice,
     TTSEmptyText,
@@ -95,8 +96,14 @@ class WindowsTTSEngine(TTSEngine):
 
     name = "windows"
 
-    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self, *, timeout: float = DEFAULT_TIMEOUT, tmp_dir: str = ""
+    ) -> None:
         self._timeout = timeout
+        self._tmp_dir = (
+            Path(tmp_dir) if tmp_dir else Path(get_default_voice_tmp_dir())
+        )
+        self._tmp_dir.mkdir(parents=True, exist_ok=True)
         self._voices_cache: list[Voice] | None = None
 
     async def list_voices(self) -> list[Voice]:
@@ -158,7 +165,9 @@ class WindowsTTSEngine(TTSEngine):
         if match is None:
             raise TTSBadVoice(f"Voice '{voice}' not found in Windows TTS voices")
 
-        fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="friday_tts_")
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".wav", prefix="friday_tts_", dir=str(self._tmp_dir)
+        )
         os.close(fd)
         path = Path(tmp_path)
 

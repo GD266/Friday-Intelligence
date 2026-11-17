@@ -7,6 +7,7 @@ import pytest
 
 from friday.config.settings import (
     ToolsSettings,
+    VoiceSettings,
     ensure_config_exists,
     load_settings,
 )
@@ -125,6 +126,16 @@ class TestConfigDefaults:
             allowed_apps={" notepad ": " notepad.exe "}
         )
         assert settings.allowed_apps == {"notepad": "notepad.exe"}
+
+    def test_voice_prefetch_bounds(self) -> None:
+        """prefetch_sentences defaults to 2 and is limited to 1..4."""
+        assert VoiceSettings().prefetch_sentences == 2
+        assert VoiceSettings(prefetch_sentences=1).prefetch_sentences == 1
+        assert VoiceSettings(prefetch_sentences=4).prefetch_sentences == 4
+        with pytest.raises(ValueError):
+            VoiceSettings(prefetch_sentences=0)
+        with pytest.raises(ValueError):
+            VoiceSettings(prefetch_sentences=5)
 
     def test_env_override(self, monkeypatch):
         """Test environment variable override."""

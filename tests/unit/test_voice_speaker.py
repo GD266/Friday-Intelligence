@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -119,19 +120,141 @@ def make_factory(engine: FakeEngine):
 
 
 def make_queue(
-    engine: FakeEngine,
+    engine: TTSEngine,
     bridge: object,
     *,
     playback_timeout: float = 60.0,
+    prefetch_sentences: int = 2,
+    tmp_dir: str = "",
     on_error=None,
 ) -> SpeechQueue:
     """Create a queue wired to a single engine instance and bridge."""
     return SpeechQueue(
         make_factory(engine),
         lambda: bridge,
+        tmp_dir=tmp_dir,
+        prefetch_sentences=prefetch_sentences,
         playback_timeout=playback_timeout,
         on_error=on_error,
     )
+
+
+class _TimingBridge:
+    """Bridge that records playback timing and holds each play for a delay."""
+
+    def __init__(self, play_delay: float = 0.0) -> None:
+        self._play_delay = play_delay
+        self.started: list[tuple[float, str]] = []
+        self.finished: list[tuple[float, str]] = []
+        self.played: list[str] = []
+        self.stopped = False
+
+    async def play_audio(self, path: str) -> None:
+        self.started.append((time.perf_counter(), path))
+        self.played.append(path)
+        try:
+            await asyncio.sleep(self._play_delay)
+        finally:
+            self.finished.append((time.perf_counter(), path))
+
+    async def stop_audio(self) -> None:
+        self.stopped = True
+
+    async def confirm(self, tool: str, description: str, args: str) -> bool:
+        return False
+
+    async def read_clipboard_text(self) -> str | None:
+        return None
+
+    def deny_pending(self) -> None:
+        pass
+
+
+class _HoldBridge:
+    """Bridge that holds each play open until release()/stop_audio()."""
+
+    def __init__(self) -> None:
+        self.hold = True
+        self.started: list[tuple[float, str]] = []
+        self.played: list[str] = []
+        self.stopped = False
+        self._events: list[asyncio.Event] = []
+
+    async def play_audio(self, path: str) -> None:
+        self.started.append((time.perf_counter(), path))
+        self.played.append(path)
+        if not self.hold:
+            return
+        event = asyncio.Event()
+        self._events.append(event)
+        await event.wait()
+
+    def release(self) -> None:
+        for event in self._events:
+            event.set()
+
+    async def stop_audio(self) -> None:
+        self.stopped = True
+        self.release()
+
+    async def confirm(self, tool: str, description: str, args: str) -> bool:
+        return False
+
+    async def read_clipboard_text(self) -> str | None:
+        return None
+
+    def deny_pending(self) -> None:
+        pass
+
+
+class TimingEngine(TTSEngine):
+    """Engine with configurable delays, optional failure and real files."""
+
+    def __init__(
+        self,
+        *,
+        delay: float = 0.0,
+        delays: dict[str, float] | None = None,
+        fail_text: str | None = None,
+        file_dir: Path | None = None,
+    ) -> None:
+        self._delay = delay
+        self._delays = delays or {}
+        self._fail_text = fail_text
+        self._file_dir = file_dir
+        self.started: list[tuple[float, str]] = []
+        self.finished: list[tuple[float, str]] = []
+        self.calls: list[str] = []
+        self.by_path: dict[str, str] = {}
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    async def list_voices(self) -> list:
+        return []
+
+    async def synthesize(
+        self, text: str, voice: str, rate_percent: int
+    ) -> SynthesisResult:
+        self.calls.append(text)
+        self.started.append((time.perf_counter(), text))
+        await asyncio.sleep(self._delays.get(text, self._delay))
+        if self._fail_text is not None and text == self._fail_text:
+            raise TTSNetworkError("synthesis boom")
+        if self._file_dir is not None:
+            path = self._file_dir / f"friday_tts_{len(self.calls)}.mp3"
+            path.write_text("audio")
+        else:
+            path = Path(tempfile.gettempdir()) / (
+                f"friday_tts_{id(self)}_{len(self.calls)}.mp3"
+            )
+        self.by_path[str(path)] = text
+        self.finished.append((time.perf_counter(), text))
+        return SynthesisResult(audio_path=str(path), format="mp3")
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.mark.asyncio
@@ -203,6 +326,188 @@ async def test_pipelining_synthesis_overlaps_playback() -> None:
     await queue.wait_idle()
 
     assert len(engine.synthesize_calls) == 2
+
+
+async def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
+def _played_texts(engine: TimingEngine, bridge) -> list[str]:
+    return [engine.by_path[path] for path in bridge.played]
+
+
+@pytest.mark.asyncio
+async def test_prefetch_starts_next_synthesis_before_playback_finishes() -> None:
+    """Synthesis N+1 begins while playback N is still open."""
+    engine = TimingEngine(delay=0.2)
+    bridge = _TimingBridge(play_delay=0.5)
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    for text in ("one", "two", "three"):
+        queue.enqueue(text, "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert len(bridge.finished) == 3
+    # Synthesis #2 starts before playback #1 finishes, and #3 before #2 ends.
+    assert engine.started[1][0] < bridge.finished[0][0]
+    assert engine.started[2][0] < bridge.finished[1][0]
+
+
+@pytest.mark.asyncio
+async def test_prefetch_keeps_gap_between_plays_under_100ms() -> None:
+    """With synth 0.2s and play 0.5s, the silence between plays is tiny."""
+    engine = TimingEngine(delay=0.2)
+    bridge = _TimingBridge(play_delay=0.5)
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    for text in ("one", "two", "three"):
+        queue.enqueue(text, "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert len(bridge.started) == 3
+    gaps_ms = [
+        (bridge.started[index][0] - bridge.finished[index - 1][0]) * 1000.0
+        for index in range(1, len(bridge.started))
+    ]
+    assert all(gap < 100.0 for gap in gaps_ms), gaps_ms
+
+
+@pytest.mark.asyncio
+async def test_prefetch_never_runs_more_than_prefetch_ahead() -> None:
+    """At most ``prefetch_sentences`` clips are ready but unplayed."""
+    engine = TimingEngine(delay=0.02)
+    bridge = _HoldBridge()
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    for text in ("one", "two", "three", "four", "five"):
+        queue.enqueue(text, "v", 0, "fake")
+
+    assert await _wait_until(lambda: bool(bridge.started))
+    await asyncio.sleep(0.1)
+
+    synthesized_ahead = len(engine.calls) - len(bridge.started)
+    assert 0 <= synthesized_ahead <= 2
+    assert len(engine.calls) <= 3  # one playing + prefetch_sentences ready
+
+    bridge.release()
+    await queue.wait_idle()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_preserves_order_with_slow_synthesis() -> None:
+    """A slow middle synthesis delays but never reorders playback."""
+    engine = TimingEngine(delay=0.02, delays={"two": 0.25})
+    bridge = _TimingBridge(play_delay=0.05)
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    for text in ("one", "two", "three"):
+        queue.enqueue(text, "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert _played_texts(engine, bridge) == ["one", "two", "three"]
+
+
+@pytest.mark.asyncio
+async def test_stop_mid_play_deletes_unplayed_and_next_reply_plays(
+    tmp_path,
+) -> None:
+    """stop() removes pending files and the next reply still plays."""
+    engine = TimingEngine(delay=0.02, file_dir=tmp_path)
+    bridge = _HoldBridge()
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    for text in ("one", "two", "three"):
+        queue.enqueue(text, "v", 0, "fake")
+    assert await _wait_until(lambda: bool(bridge.started))
+    await asyncio.sleep(0.1)
+    assert list(tmp_path.glob("friday_tts_*"))
+
+    await queue.stop()
+
+    assert bridge.stopped
+    assert list(tmp_path.glob("friday_tts_*")) == []
+
+    bridge.hold = False
+    queue.enqueue("next", "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert _played_texts(engine, bridge)[-1] == "next"
+    assert list(tmp_path.glob("friday_tts_*")) == []
+
+
+@pytest.mark.asyncio
+async def test_synthesis_error_stops_reply_with_one_error(tmp_path) -> None:
+    """A failed sentence 2 reports once and sentence 3 is never played."""
+    errors: list[tuple[str, str]] = []
+    engine = TimingEngine(delay=0.02, fail_text="two", file_dir=tmp_path)
+    bridge = _TimingBridge(play_delay=0.05)
+    queue = make_queue(
+        engine,
+        bridge,
+        prefetch_sentences=2,
+        on_error=lambda kind, msg: errors.append((kind, msg)),
+    )
+    for text in ("one", "two", "three"):
+        queue.enqueue(text, "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert len(errors) == 1
+    assert errors[0][0] == "TTSNetworkError"
+    assert "three" not in engine.calls
+    assert "three" not in _played_texts(engine, bridge)
+    assert list(tmp_path.glob("friday_tts_*")) == []
+
+
+@pytest.mark.asyncio
+async def test_timing_logs_include_all_fields(caplog) -> None:
+    """synth_ms/play_ms/gap_ms/first_audio_ms are logged, text never is."""
+    caplog.set_level(logging.INFO, logger="friday.voice.speaker")
+    engine = TimingEngine(delay=0.01)
+    bridge = _TimingBridge(play_delay=0.01)
+    queue = make_queue(engine, bridge, prefetch_sentences=2)
+    queue.enqueue("zebra-unique-spoken", "v", 0, "fake")
+    queue.enqueue("second-zebra-spoken", "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert "synth_ms=" in caplog.text
+    assert "play_ms=" in caplog.text
+    assert "gap_ms=" in caplog.text
+    assert "first_audio_ms=" in caplog.text
+    assert "zebra-unique-spoken" not in caplog.text
+    assert "second-zebra-spoken" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_temp_dir_purges_stale_and_deletes_played_files(
+    tmp_path,
+) -> None:
+    """A configured tmp_dir is purged at startup and emptied after play."""
+    stale = tmp_path / "friday_tts_stale.mp3"
+    stale.write_text("stale")
+    engine = TimingEngine(file_dir=tmp_path)
+    queue = make_queue(
+        engine, _TimingBridge(), prefetch_sentences=2, tmp_dir=str(tmp_path)
+    )
+    assert not stale.exists()
+
+    queue.enqueue("one", "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert list(tmp_path.glob("friday_tts_*")) == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_purges_stale_temp_files(tmp_path) -> None:
+    """shutdown() removes leftover friday_tts_* files at exit."""
+    queue = make_queue(
+        TimingEngine(), _TimingBridge(), tmp_dir=str(tmp_path)
+    )
+    stale = tmp_path / "friday_tts_leftover.mp3"
+    stale.write_text("stale")
+
+    await queue.shutdown()
+
+    assert not stale.exists()
 
 
 @pytest.mark.asyncio

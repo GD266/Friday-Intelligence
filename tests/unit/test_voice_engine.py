@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -150,6 +151,38 @@ def test_create_engine_windows() -> None:
 def test_create_engine_unknown_raises() -> None:
     with pytest.raises(TTSNotAvailable):
         create_engine("unknown")
+
+
+@pytest.mark.asyncio
+async def test_edge_synthesize_uses_configured_tmp_dir(tmp_path) -> None:
+    """EdgeTTS writes its audio file into the configured voice.tmp_dir."""
+
+    class _FakeCommunicate:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def save(self, path: str) -> None:
+            Path(path).write_bytes(b"audio")
+
+    voice = Voice(
+        "Microsoft David", "en-US", "Male", "Adult", "en-US-DavidNeural"
+    )
+    engine = EdgeTTSEngine(tmp_dir=str(tmp_path))
+    with (
+        patch.object(
+            engine, "list_voices", AsyncMock(return_value=[voice])
+        ),
+        patch(
+            "friday.voice.tts.edge.edge_tts.Communicate", _FakeCommunicate
+        ),
+    ):
+        result = await engine.synthesize("Hello", "", 0)
+
+    audio = Path(result.audio_path)
+    assert audio.parent == tmp_path
+    assert audio.name.startswith("friday_tts_")
+    assert audio.suffix == ".mp3"
+    assert audio.exists()
 
 
 @pytest.mark.asyncio

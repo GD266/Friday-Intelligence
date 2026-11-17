@@ -162,7 +162,9 @@ def voice_settings(tmp_path, *, engine: str = "edge") -> Settings:
 @pytest.fixture
 def fake_engine(monkeypatch):
     engine = FakeEngine()
-    monkeypatch.setattr("friday.voice.create_engine", lambda name: engine)
+    monkeypatch.setattr(
+        "friday.voice.create_engine", lambda name, **kwargs: engine
+    )
     return engine
 
 
@@ -293,7 +295,7 @@ def test_synthesis_error_emits_exactly_one_speech_error(
     """A failing engine reports one speech_error and does not retry."""
     failing = FakeEngine(fail=True)
     monkeypatch.setattr(
-        "friday.voice.create_engine", lambda name: failing
+        "friday.voice.create_engine", lambda name, **kwargs: failing
     )
     core = make_core(
         voice_settings(tmp_path), FakeProvider(["Unspeakable reply."])
@@ -336,7 +338,7 @@ def test_speak_replies_false_never_constructs_engine(
     created: list[str] = []
     monkeypatch.setattr(
         "friday.voice.create_engine",
-        lambda name: created.append(name) or FakeEngine(),
+        lambda name, **kwargs: created.append(name) or FakeEngine(),
     )
     settings = Settings(
         memory=MemorySettings(db_path=str(tmp_path / "friday.db")),

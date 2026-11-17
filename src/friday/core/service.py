@@ -594,8 +594,10 @@ class CoreService:
 
         from friday.voice import create_engine
 
+        tmp_dir = voice_settings.tmp_dir
+
         def engine_factory(name: str) -> "TTSEngine":
-            return create_engine(name)
+            return create_engine(name, tmp_dir=tmp_dir)
 
         def get_bridge() -> "UIBridge":
             return self._ui_bridge
@@ -604,6 +606,7 @@ class CoreService:
             engine_factory=engine_factory,
             get_bridge=get_bridge,
             tmp_dir=voice_settings.tmp_dir,
+            prefetch_sentences=voice_settings.prefetch_sentences,
             on_started=self._signals.speech_started.emit,
             on_finished=self._signals.speech_finished.emit,
             on_error=lambda kind, msg: self._signals.speech_error.emit(kind, msg),
@@ -737,7 +740,7 @@ class CoreService:
 
         async def shutdown_speech() -> None:
             try:
-                await queue.stop()
+                await queue.shutdown()
             except Exception:
                 logger.exception("Failed to stop speech during shutdown")
             finally:
