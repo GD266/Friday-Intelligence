@@ -42,9 +42,19 @@ from friday.memory.conversations import (
 from friday.memory.facts import Fact
 from friday.memory.search import SearchResult
 from friday.ui.audio_player import AudioPlayer
+from friday.ui.audio_recorder import AudioRecorder
 from friday.ui.confirm_dialog import ConfirmDialog
 from friday.ui.memory_dialog import MemoryDialog
 from friday.ui.tools_dialog import ToolsDialog
+from friday.ui.voice_input import (
+    VOICE_COMPLETED,
+    VOICE_ERROR,
+    VOICE_IDLE,
+    VOICE_PROCESSING,
+    VOICE_RECORDING,
+    VoiceInputController,
+    VoiceInputResult,
+)
 
 
 def _speech_tooltip(engine: str) -> str:
@@ -128,6 +138,18 @@ class MainWindow(QMainWindow):
             lambda req_id, kind, msg: self._ui_bridge.resolve_audio(req_id, kind, msg)
         )
         self._setup_ui()
+        self._voice_input = VoiceInputController(
+            self._core,
+            recorder_factory=self._create_recorder,
+            parent=self,
+        )
+        self._voice_input.state_changed.connect(self._on_voice_state_changed)
+        self._voice_input.result_ready.connect(self._on_voice_result)
+        self._voice_input.failed.connect(self._on_voice_failed)
+        self._voice_input.progress.connect(self._on_voice_progress)
+        self._voice_input.notice.connect(self._on_voice_notice)
+        self._voice_input.level_changed.connect(self._on_voice_level)
+        self._on_voice_state_changed(VOICE_IDLE)
         self._connect_signals()
 
     def _setup_ui(self) -> None:
@@ -251,6 +273,21 @@ class MainWindow(QMainWindow):
             self._on_stop_speaking_clicked
         )
         button_row.addWidget(self._stop_speaking_button)
+
+        self._voice_button = QPushButton("Record voice")
+        self._voice_button.setToolTip(
+            "Record speech and insert the recognized text into the message "
+            "box. Review and edit it before sending."
+        )
+        self._voice_button.clicked.connect(self._on_voice_clicked)
+        button_row.addWidget(self._voice_button)
+
+        self._voice_status_label = QLabel("Voice: idle")
+        self._voice_status_label.setToolTip(
+            "Voice input only fills the message box; it never sends or runs "
+            "commands automatically."
+        )
+        button_row.addWidget(self._voice_status_label)
 
         self._new_chat_button = QPushButton("New chat")
         self._new_chat_button.clicked.connect(self._on_new_chat_clicked)
@@ -667,6 +704,97 @@ class MainWindow(QMainWindow):
         self._append_notice(message)
         self._output_label.setText(message)
 
+    # ------------------------------------------------------------------
+    # Voice-input slots
+    # ------------------------------------------------------------------
+    def _create_recorder(self) -> AudioRecorder:
+        """Build the UI-thread recorder from the configured voice options."""
+        return AudioRecorder(**self._core.recording_options)
+
+    @Slot()
+    def _on_voice_clicked(self) -> None:
+        """Start, stop, or cancel voice input depending on the state."""
+        try:
+            self._voice_input.toggle()
+        except Exception as exc:
+            self._append_error(exc.__class__.__name__, str(exc))
+            self._output_label.setText("Voice input failed")
+
+    @Slot(str)
+    def _on_voice_state_changed(self, state: str) -> None:
+        labels = {
+            VOICE_IDLE: "Voice: idle",
+            VOICE_RECORDING: "Voice: listening...",
+            VOICE_PROCESSING: "Voice: transcribing...",
+            VOICE_COMPLETED: "Voice: ready - edit and send",
+            VOICE_ERROR: "Voice: error - try again",
+        }
+        buttons = {
+            VOICE_IDLE: "Record voice",
+            VOICE_RECORDING: "Stop & transcribe",
+            VOICE_PROCESSING: "Cancel transcription",
+            VOICE_COMPLETED: "Record again",
+            VOICE_ERROR: "Try again",
+        }
+        self._voice_status_label.setText(labels.get(state, "Voice"))
+        self._voice_button.setText(buttons.get(state, "Record voice"))
+        self._voice_button.setEnabled(self._core.is_running)
+        if state == VOICE_RECORDING:
+            self._output_label.setText(
+                "Listening... click the microphone button again to stop."
+            )
+        elif state == VOICE_PROCESSING:
+            self._output_label.setText("Transcribing speech...")
+
+    @Slot(object)
+    def _on_voice_result(self, result: VoiceInputResult) -> None:
+        """Insert recognized text for editing; never send it automatically."""
+        self._insert_voice_text(result.text)
+        language = result.language or "unknown"
+        self._output_label.setText(
+            f"Voice ready ({language}, "
+            f"{result.language_probability:.0%}): edit and send."
+        )
+
+    @Slot(str, str)
+    def _on_voice_failed(self, kind: str, message: str) -> None:
+        self._append_error(kind, message)
+        self._output_label.setText(f"Voice input failed: {kind}")
+
+    @Slot(str)
+    def _on_voice_progress(self, message: str) -> None:
+        if self._voice_input.state in (VOICE_RECORDING, VOICE_PROCESSING):
+            short = message.strip()
+            if len(short) > 48:
+                short = short[:45].rstrip() + "..."
+            self._voice_status_label.setText(f"Voice: {short}")
+            self._voice_status_label.setToolTip(message)
+
+    @Slot(str)
+    def _on_voice_notice(self, message: str) -> None:
+        self._output_label.setText(message)
+
+    @Slot(float)
+    def _on_voice_level(self, level: float) -> None:
+        if self._voice_input.state == VOICE_RECORDING:
+            self._voice_status_label.setText(
+                f"Voice: listening... {int(max(0.0, min(1.0, level)) * 100)}%"
+            )
+
+    def _insert_voice_text(self, text: str) -> None:
+        """Append recognized text to the chat input as editable text."""
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        existing = self._input.toPlainText()
+        if existing and not existing.endswith((" ", "\n", "\t")):
+            cleaned = " " + cleaned
+        cursor = self._input.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._input.setTextCursor(cursor)
+        self._input.insertPlainText(cleaned)
+        self._input.setFocus()
+
     def _close_confirm_dialog(self) -> None:
         dialog = self._confirm_dialog
         if dialog is not None:
@@ -964,6 +1092,7 @@ class MainWindow(QMainWindow):
     def _on_core_started(self) -> None:
         self._status_label.setText("Core: running | Idle")
         self._ping_button.setEnabled(True)
+        self._voice_button.setEnabled(True)
 
     @Slot()
     def _on_ping_clicked(self) -> None:
@@ -992,6 +1121,7 @@ class MainWindow(QMainWindow):
         self._stop_button.setEnabled(False)
         self._new_chat_button.setEnabled(False)
         self._stop_speaking_button.setEnabled(False)
+        self._voice_button.setEnabled(False)
 
     def set_core_failed(self, message: str) -> None:
         """Mark the core as failed and disable core-dependent controls."""
@@ -1005,11 +1135,13 @@ class MainWindow(QMainWindow):
         self._conversation_list.setEnabled(False)
         self._stop_speaking_button.setEnabled(False)
         self._speak_checkbox.setEnabled(False)
+        self._voice_button.setEnabled(False)
 
     def closeEvent(self, event) -> None:
         """Deny pending requests and stop the core on window close."""
         self._close_confirm_dialog()
-        # Stop any ongoing speech before tearing the core down.
+        # Discard a recording and stop speech before tearing the core down.
+        self._voice_input.dispose()
         self._core.stop_speaking()
         self._ui_bridge.shutdown()
         self._core.stop()

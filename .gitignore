@@ -17,3 +17,6 @@ build/
 
 # Secrets / local configuration
 .env
+
+# Local benchmark reports (contain recognised speech)
+benchmark_reports/

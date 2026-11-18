@@ -111,6 +111,63 @@ class VoiceSettings(BaseModel):
         return value
 
 
+# Multilingual Faster-Whisper sizes FRIDAY accepts.  English-only ".en"
+# models are rejected on purpose: Hindi requires the multilingual weights.
+STT_MODELS: tuple[str, ...] = (
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v2",
+    "large-v3",
+)
+STT_LANGUAGES: tuple[str, ...] = ("auto", "en", "hi")
+
+
+class STTSettings(BaseModel):
+    """Speech-to-text (local Faster-Whisper) settings.
+
+    The defaults come from the Phase 5b-2 benchmark: multilingual tiny,
+    beam 5, and conservative VAD (low threshold, generous padding) so
+    quiet sentence endings survive while trailing noise is trimmed.
+    """
+
+    model: str = "tiny"
+    cpu_threads: int = Field(default=0, ge=0, le=64)
+    language: str = "auto"
+    beam_size: int = Field(default=5, ge=1, le=10)
+    vad_filter: bool = True
+    vad_threshold: float = Field(default=0.4, gt=0, lt=1)
+    vad_min_silence_ms: int = Field(default=500, ge=0, le=10_000)
+    vad_speech_pad_ms: int = Field(default=400, ge=0, le=2_000)
+    vad_min_speech_ms: int = Field(default=0, ge=0, le=5_000)
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned:
+            raise ValueError("model must not be empty")
+        if cleaned.endswith(".en"):
+            raise ValueError(
+                "English-only Whisper models (.en) are not supported; "
+                "use the multilingual model, e.g. 'tiny'."
+            )
+        if cleaned not in STT_MODELS:
+            allowed = ", ".join(STT_MODELS)
+            raise ValueError(f"model must be one of: {allowed}")
+        return cleaned
+
+    @field_validator("language")
+    @classmethod
+    def _validate_language(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in STT_LANGUAGES:
+            allowed = ", ".join(STT_LANGUAGES)
+            raise ValueError(f"language must be one of: {allowed}")
+        return cleaned
+
+
 class ToolsSettings(BaseModel):
     """Tool runtime settings."""
 
@@ -158,6 +215,7 @@ class Settings(BaseSettings):
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     ui: UISettings = Field(default_factory=UISettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    stt: STTSettings = Field(default_factory=STTSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="FRIDAY_",
@@ -233,6 +291,17 @@ input_device = ""
 max_record_seconds = 30
 min_record_seconds = 0.3
 silence_peak_threshold = 0.01
+
+[stt]
+model = "tiny"
+cpu_threads = 0
+language = "auto"
+beam_size = 5
+vad_filter = true
+vad_threshold = 0.4
+vad_min_silence_ms = 500
+vad_speech_pad_ms = 400
+vad_min_speech_ms = 0
 """.strip()
 
 
@@ -359,6 +428,15 @@ def _apply_env_overrides(data: dict) -> dict:
             "voice",
             "silence_peak_threshold",
         ),
+        "FRIDAY_STT__MODEL": ("stt", "model"),
+        "FRIDAY_STT__CPU_THREADS": ("stt", "cpu_threads"),
+        "FRIDAY_STT__LANGUAGE": ("stt", "language"),
+        "FRIDAY_STT__BEAM_SIZE": ("stt", "beam_size"),
+        "FRIDAY_STT__VAD_FILTER": ("stt", "vad_filter"),
+        "FRIDAY_STT__VAD_THRESHOLD": ("stt", "vad_threshold"),
+        "FRIDAY_STT__VAD_MIN_SILENCE_MS": ("stt", "vad_min_silence_ms"),
+        "FRIDAY_STT__VAD_SPEECH_PAD_MS": ("stt", "vad_speech_pad_ms"),
+        "FRIDAY_STT__VAD_MIN_SPEECH_MS": ("stt", "vad_min_speech_ms"),
     }
 
     result = data.copy()
@@ -366,7 +444,7 @@ def _apply_env_overrides(data: dict) -> dict:
         value = os.environ.get(env_var)
         if value is not None:
             # Convert value to appropriate type
-            if key in ("debug", "enabled", "speak_replies"):
+            if key in ("debug", "enabled", "speak_replies", "vad_filter"):
                 value = value.lower() in ("true", "1", "yes")
             elif key in (
                 "ping_timeout",
@@ -391,6 +469,12 @@ def _apply_env_overrides(data: dict) -> dict:
                 "max_record_seconds",
                 "min_record_seconds",
                 "silence_peak_threshold",
+                "cpu_threads",
+                "beam_size",
+                "vad_threshold",
+                "vad_min_silence_ms",
+                "vad_speech_pad_ms",
+                "vad_min_speech_ms",
             ):
                 is_float = key in (
                     "ping_timeout",
@@ -400,6 +484,7 @@ def _apply_env_overrides(data: dict) -> dict:
                     "confirm_timeout_seconds",
                     "min_record_seconds",
                     "silence_peak_threshold",
+                    "vad_threshold",
                 )
                 value = float(value) if is_float else int(value)
 

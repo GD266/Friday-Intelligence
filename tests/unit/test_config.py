@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from friday.config.settings import (
+    STTSettings,
     ToolsSettings,
     VoiceSettings,
     ensure_config_exists,
@@ -163,6 +164,78 @@ class TestConfigDefaults:
         with pytest.raises(ValueError):
             VoiceSettings(silence_peak_threshold=1.01)
 
+    def test_stt_defaults(self) -> None:
+        """STT defaults to the multilingual tiny model with auto language."""
+        stt = STTSettings()
+        assert stt.model == "tiny"
+        assert stt.cpu_threads == 0
+        assert stt.language == "auto"
+        assert stt.beam_size == 5
+        assert stt.vad_filter is True
+        assert stt.vad_threshold == 0.4
+        assert stt.vad_min_silence_ms == 500
+        assert stt.vad_speech_pad_ms == 400
+        assert stt.vad_min_speech_ms == 0
+
+    def test_stt_accepts_multilingual_tiny_and_base(self) -> None:
+        assert STTSettings(model="tiny").model == "tiny"
+        assert STTSettings(model="base").model == "base"
+
+    def test_stt_beam_size_bounds(self) -> None:
+        assert STTSettings(beam_size=1).beam_size == 1
+        assert STTSettings(beam_size=5).beam_size == 5
+        with pytest.raises(ValueError):
+            STTSettings(beam_size=0)
+        with pytest.raises(ValueError):
+            STTSettings(beam_size=11)
+
+    def test_stt_vad_bounds(self) -> None:
+        with pytest.raises(ValueError):
+            STTSettings(vad_threshold=0)
+        with pytest.raises(ValueError):
+            STTSettings(vad_threshold=1)
+        with pytest.raises(ValueError):
+            STTSettings(vad_min_silence_ms=-1)
+        with pytest.raises(ValueError):
+            STTSettings(vad_speech_pad_ms=-1)
+        with pytest.raises(ValueError):
+            STTSettings(vad_min_speech_ms=-1)
+
+    def test_stt_rejects_english_only_models(self) -> None:
+        """tiny.en is English-only and must never be used."""
+        with pytest.raises(ValueError, match="English-only"):
+            STTSettings(model="tiny.en")
+
+    def test_stt_rejects_unknown_model(self) -> None:
+        with pytest.raises(ValueError, match="model must be one of"):
+            STTSettings(model="gigantic")
+
+    def test_stt_model_is_normalized(self) -> None:
+        assert STTSettings(model=" Tiny ").model == "tiny"
+
+    def test_stt_rejects_unsupported_language(self) -> None:
+        with pytest.raises(ValueError, match="language must be one of"):
+            STTSettings(language="fr")
+
+    def test_stt_cpu_threads_bounds(self) -> None:
+        assert STTSettings(cpu_threads=0).cpu_threads == 0
+        assert STTSettings(cpu_threads=4).cpu_threads == 4
+        with pytest.raises(ValueError):
+            STTSettings(cpu_threads=-1)
+        with pytest.raises(ValueError):
+            STTSettings(cpu_threads=65)
+
+    def test_stt_section_in_default_config(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("APPDATA", tmpdir)
+            content = ensure_config_exists().read_text(encoding="utf-8")
+            assert "[stt]" in content
+            assert 'model = "tiny"' in content
+            assert 'language = "auto"' in content
+            assert "beam_size = 5" in content
+            assert "vad_filter = true" in content
+            assert load_settings().stt.model == "tiny"
+
     def test_env_override(self, monkeypatch):
         """Test environment variable override."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,6 +257,15 @@ class TestConfigDefaults:
                 "FRIDAY_TOOLS__CONFIRM_TIMEOUT_SECONDS", "7.5"
             )
             monkeypatch.setenv("FRIDAY_TOOLS__MAX_RESULT_CHARS", "500")
+            monkeypatch.setenv("FRIDAY_STT__MODEL", "small")
+            monkeypatch.setenv("FRIDAY_STT__CPU_THREADS", "6")
+            monkeypatch.setenv("FRIDAY_STT__LANGUAGE", "hi")
+            monkeypatch.setenv("FRIDAY_STT__BEAM_SIZE", "1")
+            monkeypatch.setenv("FRIDAY_STT__VAD_FILTER", "true")
+            monkeypatch.setenv("FRIDAY_STT__VAD_THRESHOLD", "0.35")
+            monkeypatch.setenv("FRIDAY_STT__VAD_MIN_SILENCE_MS", "300")
+            monkeypatch.setenv("FRIDAY_STT__VAD_SPEECH_PAD_MS", "500")
+            monkeypatch.setenv("FRIDAY_STT__VAD_MIN_SPEECH_MS", "80")
             settings = load_settings()
             assert settings.app.log_level == "DEBUG"
             assert settings.provider.model == "meta/llama-3.1-8b"
@@ -198,6 +280,15 @@ class TestConfigDefaults:
             assert settings.tools.tool_timeout_seconds == 2.5
             assert settings.tools.confirm_timeout_seconds == 7.5
             assert settings.tools.max_result_chars == 500
+            assert settings.stt.model == "small"
+            assert settings.stt.cpu_threads == 6
+            assert settings.stt.language == "hi"
+            assert settings.stt.beam_size == 1
+            assert settings.stt.vad_filter is True
+            assert settings.stt.vad_threshold == pytest.approx(0.35)
+            assert settings.stt.vad_min_silence_ms == 300
+            assert settings.stt.vad_speech_pad_ms == 500
+            assert settings.stt.vad_min_speech_ms == 80
 
 
 class TestConfigFileCompatibility:

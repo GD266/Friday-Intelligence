@@ -61,7 +61,9 @@ from friday.tools.base import (
 from friday.tools.builtin import build_builtin_registry
 from friday.tools.permissions import Decision, TurnState, decide
 from friday.tools.registry import ToolRegistry
+from friday.voice.errors import TranscriptionError
 from friday.voice.speaker import SpeechQueue
+from friday.voice.stt.base import TranscriptionEngine
 from friday.voice.text import prepare_and_split
 from friday.voice.tts.base import TTSEngine
 
@@ -213,6 +215,12 @@ class CoreSignals(QObject):
     speech_error = Signal(str, str)
     speech_notice = Signal(str)
 
+    # Voice-input signals (microphone -> speech-to-text)
+    voice_result = Signal(object)
+    voice_error = Signal(str, str)
+    voice_cancelled = Signal()
+    voice_progress = Signal(str)
+
 
 class CoreService:
     """Core service running asyncio loop in a dedicated thread."""
@@ -258,6 +266,8 @@ class CoreService:
         )
         self._speech_enabled_explicit = False
         self._turn_tainted = False
+        self._stt_engine: TranscriptionEngine | None = None
+        self._voice_task: asyncio.Task | None = None
 
     @property
     def signals(self) -> CoreSignals:
@@ -288,6 +298,19 @@ class CoreService:
         if self._settings is not None:
             return self._settings.voice.engine
         return "edge"
+
+    @property
+    def recording_options(self) -> dict[str, object]:
+        """Return the recorder keyword arguments from the voice settings."""
+        if self._settings is None:
+            return {}
+        voice = self._settings.voice
+        return {
+            "input_device": voice.input_device,
+            "max_record_seconds": float(voice.max_record_seconds),
+            "min_record_seconds": voice.min_record_seconds,
+            "silence_peak_threshold": voice.silence_peak_threshold,
+        }
 
     def start(self) -> None:
         """Start the core service in a dedicated thread."""
@@ -429,6 +452,37 @@ class CoreService:
         if not self._running or self._loop is None:
             raise RuntimeError("Core service not running")
         self._loop.call_soon_threadsafe(self._search_chats, query)
+
+    def transcribe_voice(self, pcm: bytes) -> None:
+        """Transcribe recorded 16 kHz mono int16 PCM from the UI thread.
+
+        Model loading and inference run on the core asyncio thread (and its
+        worker threads), never on the Qt UI thread.  Results and errors are
+        delivered through the ``voice_*`` signals.
+        """
+        if not isinstance(pcm, (bytes, bytearray, memoryview)):
+            self._signals.voice_error.emit(
+                "UnsupportedAudioFormat", "Voice input must be raw PCM bytes."
+            )
+            return
+        data = bytes(pcm)
+        if not data:
+            self._signals.voice_error.emit(
+                "EmptyAudio", "The recording is empty; nothing was captured."
+            )
+            return
+        if not self._running or self._loop is None:
+            self._signals.voice_error.emit(
+                "CoreNotRunning", "Core service not running"
+            )
+            return
+        self._loop.call_soon_threadsafe(self._schedule_transcription, data)
+
+    def cancel_voice_input(self) -> None:
+        """Cancel an in-flight transcription from the UI thread."""
+        if not self._running or self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._cancel_voice_transcription)
 
     def set_ui_bridge(self, bridge: UIBridge) -> None:
         """Attach the UI bridge used for confirmations, clipboard reads,
@@ -631,6 +685,79 @@ class CoreService:
             on_notice=lambda msg: self._signals.speech_notice.emit(msg),
         )
         return self._speech_queue
+
+    def _ensure_stt_engine(self) -> TranscriptionEngine:
+        """Create the configured transcription engine on the core thread."""
+        if self._stt_engine is not None:
+            return self._stt_engine
+
+        from friday.voice.stt import create_transcription_engine
+
+        stt_settings = self._settings.stt if self._settings is not None else None
+        self._stt_engine = create_transcription_engine(
+            settings=stt_settings,
+            on_status=lambda status: self._signals.voice_progress.emit(
+                status.message
+            ),
+        )
+        return self._stt_engine
+
+    def _schedule_transcription(self, pcm: bytes) -> None:
+        """Start one transcription task; runs on the core loop."""
+        if self._voice_task is not None and not self._voice_task.done():
+            self._signals.voice_error.emit(
+                "Busy", "A transcription is already running."
+            )
+            return
+        self._voice_task = asyncio.ensure_future(self._run_transcription(pcm))
+
+    async def _run_transcription(self, pcm: bytes) -> None:
+        """Run one transcription without blocking the core or UI threads."""
+        try:
+            engine = self._ensure_stt_engine()
+            result = await engine.transcribe(pcm)
+        except asyncio.CancelledError:
+            self._signals.voice_cancelled.emit()
+            raise
+        except TranscriptionError as exc:
+            self._signals.voice_error.emit(exc.kind, exc.message)
+        except Exception as exc:
+            logger.exception("Voice transcription failed")
+            self._signals.voice_error.emit(exc.__class__.__name__, str(exc))
+        else:
+            self._signals.voice_result.emit(result)
+        finally:
+            if self._voice_task is asyncio.current_task():
+                self._voice_task = None
+
+    def _cancel_voice_transcription(self) -> None:
+        task = self._voice_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _shutdown_voice(self) -> None:
+        """Cancel any transcription and release the model at shutdown."""
+        task = self._voice_task
+        self._voice_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception(
+                    "Voice transcription failed during shutdown"
+                )
+
+        engine = self._stt_engine
+        self._stt_engine = None
+        if engine is None:
+            return
+        try:
+            await engine.close()
+        except Exception:
+            logger.exception("Failed to close the transcription engine")
 
     def _speak_final_response(self, text: str) -> None:
         """Speak the final assistant response if voice is enabled."""
@@ -1756,6 +1883,7 @@ class CoreService:
                 pass
 
         await self._shutdown_chat()
+        await self._shutdown_voice()
         await self._close_provider()
         self._close_memory()
 

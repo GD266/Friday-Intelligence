@@ -1,4 +1,4 @@
-"""Typed TTS errors with user-readable messages."""
+"""Typed voice errors (TTS, capture and transcription) with messages."""
 
 from __future__ import annotations
 
@@ -111,6 +111,46 @@ class RecordingError(AudioCaptureError):
     kind = "RecordingError"
 
 
+class TranscriptionError(Exception):
+    """Base class for speech-to-text failures."""
+
+    kind = "TranscriptionError"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class TranscriptionNotAvailable(TranscriptionError):
+    """The local transcription engine or its package is unavailable."""
+
+    kind = "TranscriptionNotAvailable"
+
+
+class ModelLoadError(TranscriptionError):
+    """The Faster-Whisper model could not be downloaded or loaded."""
+
+    kind = "ModelLoadError"
+
+
+class EmptyAudio(TranscriptionError):
+    """The supplied audio contains no samples."""
+
+    kind = "EmptyAudio"
+
+
+class UnsupportedAudioFormat(TranscriptionError):
+    """The supplied audio is not 16 kHz mono 16-bit PCM."""
+
+    kind = "UnsupportedAudioFormat"
+
+
+class UnsupportedLanguage(TranscriptionError):
+    """The requested language is not English or Hindi."""
+
+    kind = "UnsupportedLanguage"
+
+
 def build_tts_http_error(
     status_code: int,
     body: str,
@@ -154,6 +194,12 @@ __all__ = [
     "MicPermissionOrSilent",
     "RecordingTooShort",
     "RecordingError",
+    "TranscriptionError",
+    "TranscriptionNotAvailable",
+    "ModelLoadError",
+    "EmptyAudio",
+    "UnsupportedAudioFormat",
+    "UnsupportedLanguage",
     "build_tts_http_error",
     "sanitize_provider_message",
 ]
