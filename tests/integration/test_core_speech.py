@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -525,5 +526,110 @@ def test_read_clipboard_turn_with_online_engine_is_notice_only(
         settle(0.2)
         assert bridge.play_requests == []
         assert "clipboard" in notices.at(0)[0]
+    finally:
+        core.stop()
+
+
+def test_microphone_gate_is_synchronous_and_logged(caplog) -> None:
+    """The gate is a plain thread-safe flag with visible INFO transitions."""
+    core = CoreService()
+    caplog.set_level(logging.INFO, logger="friday.core.service")
+
+    assert core.is_microphone_active is False
+    core.set_microphone_active(True)
+    assert core.is_microphone_active is True
+    core.set_microphone_active(False)
+    assert core.is_microphone_active is False
+
+    assert "mic_gate_on" in caplog.text
+    assert "mic_gate_off" in caplog.text
+
+
+def test_microphone_gate_cancels_current_playback(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """Opening the gate stops the reply that is playing and nothing follows."""
+    bridge = RecordingBridge(hold=True)
+    core = make_core(
+        voice_settings(tmp_path),
+        FakeProvider(["First reply.", "Second reply."]),
+    )
+    errors = QSignalSpy(core.signals.speech_error)
+    core.start()
+
+    try:
+        assert wait_until(lambda: core._speech_queue is not None)
+        core.set_ui_bridge(bridge)
+        core.chat_send("first")
+        assert wait_until(lambda: len(bridge.play_requests) >= 1)
+        played_before_gate = len(bridge.play_requests)
+
+        core.set_microphone_active(True)
+        core.stop_speaking()
+
+        assert wait_until(lambda: bridge.stopped)
+        assert wait_until(lambda: not core.speech_active)
+        settle(0.2)
+        assert len(bridge.play_requests) == played_before_gate
+        assert errors.count() == 0
+    finally:
+        core.stop()
+
+
+def test_reply_finishing_while_gated_is_notice_only(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """A reply that completes with the gate open never reaches the player."""
+    bridge = RecordingBridge()
+    core = make_core(
+        voice_settings(tmp_path), FakeProvider(["Gated reply."])
+    )
+    notices = QSignalSpy(core.signals.speech_notice)
+    done = QSignalSpy(core.signals.message_done)
+    errors = QSignalSpy(core.signals.speech_error)
+    core.start()
+
+    try:
+        assert wait_until(lambda: core._speech_queue is not None)
+        core.set_ui_bridge(bridge)
+        core.set_microphone_active(True)
+        core.chat_send("hello")
+
+        assert wait_until(lambda: done.count() == 1)
+        assert wait_until(lambda: notices.count() == 1)
+        settle(0.2)
+
+        assert bridge.play_requests == []
+        assert notices.at(0)[0] == "Not spoken: microphone is recording."
+        assert errors.count() == 0
+    finally:
+        core.stop()
+
+
+def test_gate_off_allows_the_next_reply_to_speak(
+    qapp, tmp_path, fake_engine
+) -> None:
+    """Closing the gate restores speech for the next reply."""
+    bridge = RecordingBridge()
+    core = make_core(
+        voice_settings(tmp_path),
+        FakeProvider(["Silenced reply.", "Audible reply."]),
+    )
+    notices = QSignalSpy(core.signals.speech_notice)
+    done = QSignalSpy(core.signals.message_done)
+    core.start()
+
+    try:
+        assert wait_until(lambda: core._speech_queue is not None)
+        core.set_ui_bridge(bridge)
+        core.set_microphone_active(True)
+        core.chat_send("first")
+        assert wait_until(lambda: done.count() == 1)
+        assert wait_until(lambda: notices.count() == 1)
+        assert bridge.play_requests == []
+
+        core.set_microphone_active(False)
+        core.chat_send("second")
+        assert wait_until(lambda: len(bridge.play_requests) > 0)
     finally:
         core.stop()

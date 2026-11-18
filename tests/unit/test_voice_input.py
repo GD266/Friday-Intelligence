@@ -11,6 +11,9 @@ touched, and recognized text never enters the chat pipeline.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
 from PySide6.QtCore import QObject, Signal
 
 from friday.ui.voice_input import (
@@ -392,3 +395,163 @@ def test_dispose_while_recording_cancels_without_terminal_signals() -> None:
     assert results == []
     assert failures == []
     assert core.pcm == []
+
+
+class _OrderRecorder(FakeRecorder):
+    """Recorder that records when its start() actually runs."""
+
+    def __init__(self, order: list[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._order = order
+
+    def start(self) -> None:
+        self._order.append("recorder.start")
+        super().start()
+
+
+def test_start_calls_before_record_once_before_recorder_start() -> None:
+    order: list[str] = []
+    recorder = _OrderRecorder(order)
+    controller = VoiceInputController(
+        FakeCore(),
+        recorder_factory=lambda: recorder,
+        before_record=lambda: order.append("before_record"),
+    )
+
+    assert controller.start() is True
+
+    assert order == ["before_record", "recorder.start"]
+    assert controller.state == VOICE_RECORDING
+
+
+def test_before_record_is_not_called_twice_or_while_busy() -> None:
+    calls: list[int] = []
+    controller = VoiceInputController(
+        FakeCore(),
+        recorder_factory=FakeRecorder,
+        before_record=lambda: calls.append(1),
+    )
+
+    assert controller.start() is True
+    assert controller.start() is False
+    assert calls == [1]
+
+    controller.stop()
+    assert controller.start() is False
+    assert calls == [1]
+
+
+def test_before_record_is_not_called_when_core_is_stopped() -> None:
+    calls: list[int] = []
+    recorder = FakeRecorder()
+    controller = VoiceInputController(
+        FakeCore(running=False),
+        recorder_factory=lambda: recorder,
+        before_record=lambda: calls.append(1),
+    )
+
+    assert controller.start() is False
+    assert calls == []
+    assert recorder.start_calls == 0
+
+
+def test_before_record_failure_still_starts_recording() -> None:
+    recorder = FakeRecorder()
+    controller = VoiceInputController(
+        FakeCore(),
+        recorder_factory=lambda: recorder,
+        before_record=lambda: (_ for _ in ()).throw(RuntimeError("hook boom")),
+    )
+
+    assert controller.start() is True
+    assert recorder.start_calls == 1
+    assert controller.state == VOICE_RECORDING
+
+
+@pytest.mark.parametrize(
+    "ending",
+    ["finished", "empty", "cancel", "error", "dispose"],
+)
+def test_after_record_closes_the_gate_on_every_ending(ending: str) -> None:
+    gate = {"active": False}
+    after_calls: list[int] = []
+
+    def _open_gate() -> None:
+        gate["active"] = True
+
+    def _close_gate() -> None:
+        gate["active"] = False
+        after_calls.append(1)
+
+    recorder = FakeRecorder(
+        pcm=b"" if ending == "empty" else PCM,
+        error_on_stop=(
+            ("RecordingTooShort", "Recording too short.")
+            if ending == "error"
+            else None
+        ),
+    )
+    controller = VoiceInputController(
+        FakeCore(),
+        recorder_factory=lambda: recorder,
+        before_record=_open_gate,
+        after_record=_close_gate,
+    )
+
+    controller.start()
+    assert gate["active"] is True
+
+    if ending in ("finished", "empty", "error"):
+        controller.stop()
+    elif ending == "cancel":
+        controller.cancel()
+    else:
+        controller.dispose()
+
+    assert gate["active"] is False
+    assert after_calls == [1]
+
+
+def test_after_record_is_not_called_when_recording_never_started() -> None:
+    after_calls: list[int] = []
+    controller = VoiceInputController(
+        FakeCore(running=False),
+        recorder_factory=FakeRecorder,
+        after_record=lambda: after_calls.append(1),
+    )
+
+    assert controller.start() is False
+    controller.cancel()
+    controller.dispose()
+
+    assert after_calls == []
+
+
+def test_late_level_after_stop_is_ignored() -> None:
+    controller, core, recorder = _controller()
+    levels: list[float] = []
+    controller.level_changed.connect(levels.append)
+
+    controller.start()
+    recorder.level.emit(0.3)
+    controller.stop()
+    recorder.level.emit(0.9)
+
+    assert levels == [0.3]
+
+
+def test_record_start_logs_speech_active_without_text(caplog) -> None:
+    core = FakeCore()
+    core.speech_active = True
+    recorder = FakeRecorder()
+    controller = VoiceInputController(
+        core,
+        recorder_factory=lambda: recorder,
+    )
+
+    with caplog.at_level(logging.INFO, logger="friday.ui.voice_input"):
+        controller.start()
+
+    assert "record_start: speech_active=true" in caplog.text
+    assert "Hello Friday" not in caplog.text
+

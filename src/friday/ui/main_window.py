@@ -141,6 +141,8 @@ class MainWindow(QMainWindow):
         self._voice_input = VoiceInputController(
             self._core,
             recorder_factory=self._create_recorder,
+            before_record=self._before_voice_record,
+            after_record=self._after_voice_record,
             parent=self,
         )
         self._voice_input.state_changed.connect(self._on_voice_state_changed)
@@ -660,6 +662,11 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_play_audio_requested(self, request_id: str, path: str) -> None:
         """Handle play audio request from the bridge."""
+        if self._core.is_microphone_active:
+            # A request queued just before the gate opened must not play
+            # into the microphone; resolve it without touching the player.
+            self._ui_bridge.resolve_audio(request_id)
+            return
         self._audio_player.play(path, request_id)
 
     @Slot()
@@ -710,6 +717,16 @@ class MainWindow(QMainWindow):
     def _create_recorder(self) -> AudioRecorder:
         """Build the UI-thread recorder from the configured voice options."""
         return AudioRecorder(**self._core.recording_options)
+
+    def _before_voice_record(self) -> None:
+        """Close Aria's mouth before the microphone opens (UI thread)."""
+        self._core.set_microphone_active(True)
+        self._core.stop_speaking()
+        self._audio_player.stop()
+
+    def _after_voice_record(self) -> None:
+        """Reopen speech once the microphone is closed."""
+        self._core.set_microphone_active(False)
 
     @Slot()
     def _on_voice_clicked(self) -> None:

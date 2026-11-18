@@ -268,6 +268,10 @@ class CoreService:
         self._turn_tainted = False
         self._stt_engine: TranscriptionEngine | None = None
         self._voice_task: asyncio.Task | None = None
+        # Microphone gate: while a recording is open, no speech may start.
+        # Set from the UI thread, read from the core thread.
+        self._microphone_active = False
+        self._microphone_lock = threading.Lock()
 
     @property
     def signals(self) -> CoreSignals:
@@ -298,6 +302,36 @@ class CoreService:
         if self._settings is not None:
             return self._settings.voice.engine
         return "edge"
+
+    @property
+    def is_microphone_active(self) -> bool:
+        """Return True while the microphone gate is open."""
+        with self._microphone_lock:
+            return self._microphone_active
+
+    @property
+    def speech_active(self) -> bool:
+        """Return True while the speech queue has work in flight."""
+        queue = self._speech_queue
+        return bool(queue is not None and queue.is_running)
+
+    def set_microphone_active(self, active: bool) -> None:
+        """Open or close the microphone gate (synchronous, thread-safe).
+
+        Called from the UI thread before recording starts. While the gate is
+        open the core speaks nothing, ``_speak_final_response`` emits one
+        notice instead, and the speech queue refuses every play request.
+        Opening the gate also requests a non-blocking speech stop so an
+        in-flight reply cannot keep talking over the microphone.
+        """
+        with self._microphone_lock:
+            was_active = self._microphone_active
+            self._microphone_active = bool(active)
+        if active and not was_active:
+            logger.info("mic_gate_on")
+            self._request_speech_stop()
+        elif not active and was_active:
+            logger.info("mic_gate_off")
 
     @property
     def recording_options(self) -> dict[str, object]:
@@ -683,6 +717,7 @@ class CoreService:
             on_finished=self._signals.speech_finished.emit,
             on_error=lambda kind, msg: self._signals.speech_error.emit(kind, msg),
             on_notice=lambda msg: self._signals.speech_notice.emit(msg),
+            is_microphone_active=lambda: self.is_microphone_active,
         )
         return self._speech_queue
 
@@ -761,6 +796,12 @@ class CoreService:
 
     def _speak_final_response(self, text: str) -> None:
         """Speak the final assistant response if voice is enabled."""
+        if self.is_microphone_active:
+            logger.info("Speech skipped: microphone is recording")
+            self._signals.speech_notice.emit(
+                "Not spoken: microphone is recording."
+            )
+            return
         if self._settings is None:
             return
         voice_settings = self._settings.voice

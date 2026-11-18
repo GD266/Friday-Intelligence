@@ -80,9 +80,11 @@ class SpeechQueue:
         on_error: Callable[[str, str], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
         playback_timeout: float = DEFAULT_PLAYBACK_TIMEOUT,
+        is_microphone_active: Callable[[], bool] | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._get_bridge = get_bridge
+        self._is_microphone_active = is_microphone_active or (lambda: False)
         self._tmp_dir = Path(tmp_dir) if tmp_dir else default_tmp_dir()
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -509,8 +511,21 @@ class SpeechQueue:
         return result
 
     async def _play(self, result: SynthesisResult, task: SpeechTask) -> bool:
-        """Play one clip; return False when playback failed."""
+        """Play one clip; return False when playback failed.
+
+        The microphone gate is checked here, immediately before every play
+        request, so a clip synthesized before the microphone opened can never
+        start playing into it. The clip is dropped without failing the reply
+        and its temp file is removed.
+        """
         audio_path = Path(result.audio_path)
+        if self._is_microphone_active():
+            self._remove_audio(result)
+            logger.info(
+                "speech dropped: microphone active len=%d",
+                len(task.text),
+            )
+            return True
         bridge = self._get_bridge()
         now = time.perf_counter()
         gap_ms = (

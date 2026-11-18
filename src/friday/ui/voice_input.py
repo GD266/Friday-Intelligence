@@ -118,6 +118,10 @@ class VoiceCoreLike(Protocol):
         ...
 
 
+def _noop() -> None:
+    """Default recording hook."""
+
+
 class VoiceInputController(QObject):
     """Drive one recording/transcription attempt at a time.
 
@@ -142,11 +146,16 @@ class VoiceInputController(QObject):
         core: VoiceCoreLike,
         *,
         recorder_factory: Callable[[], RecorderLike] | None = None,
+        before_record: Callable[[], None] | None = None,
+        after_record: Callable[[], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._core = core
         self._recorder_factory = recorder_factory or AudioRecorder
+        self._before_record = before_record or _noop
+        self._after_record = after_record or _noop
+        self._record_hook_active = False
         self._recorder: RecorderLike | None = None
         self._state = VOICE_IDLE
         self._capture_meta: tuple[float, float, float] | None = None
@@ -180,12 +189,28 @@ class VoiceInputController(QObject):
 
         self._capture_meta = None
         recorder = self._ensure_recorder()
+        # Capture this before the gate closes speech so the log records what
+        # Aria was doing when Record was pressed.
+        speech_active = bool(getattr(self._core, "speech_active", False))
         self._set_state(VOICE_RECORDING)
+        self._record_hook_active = True
+        try:
+            self._before_record()
+        except Exception:
+            logger.exception("before_record hook failed")
         try:
             recorder.start()
         except Exception as exc:
+            logger.info(
+                "record_start: speech_active=%s result=failed",
+                "true" if speech_active else "false",
+            )
             self._fail(type(exc).__name__, str(exc))
             return False
+        logger.info(
+            "record_start: speech_active=%s",
+            "true" if speech_active else "false",
+        )
         return self._state == VOICE_RECORDING
 
     def stop(self) -> None:
@@ -200,6 +225,10 @@ class VoiceInputController(QObject):
             recorder.stop()
         except Exception as exc:
             self._fail(type(exc).__name__, str(exc))
+            return
+        # The recorder closes the device synchronously before returning, so
+        # the gate must not stay closed if no terminal signal arrives.
+        self._notify_after_record()
 
     def toggle(self) -> None:
         """Handle the single microphone button."""
@@ -220,6 +249,7 @@ class VoiceInputController(QObject):
                 except Exception:
                     logger.debug("recording cancel failed", exc_info=True)
             self._capture_meta = None
+            self._notify_after_record()
             self._set_state(VOICE_IDLE)
             self.notice.emit("Voice recording discarded.")
             return
@@ -248,6 +278,7 @@ class VoiceInputController(QObject):
             except Exception:
                 logger.debug("recording dispose failed", exc_info=True)
         self._capture_meta = None
+        self._notify_after_record()
         self._state = VOICE_IDLE
 
     # ------------------------------------------------------------------
@@ -289,6 +320,7 @@ class VoiceInputController(QObject):
             return
 
         self._capture_meta = (duration_seconds, peak, rms_dbfs)
+        self._notify_after_record()
         self._set_state(VOICE_PROCESSING)
         self.progress.emit("Transcribing speech...")
         try:
@@ -367,8 +399,19 @@ class VoiceInputController(QObject):
         self._state = state
         self.state_changed.emit(state)
 
+    def _notify_after_record(self) -> None:
+        """Close the microphone gate once per started recording."""
+        if not self._record_hook_active:
+            return
+        self._record_hook_active = False
+        try:
+            self._after_record()
+        except Exception:
+            logger.exception("after_record hook failed")
+
     def _fail(self, kind: str, message: str) -> None:
         self._capture_meta = None
+        self._notify_after_record()
         self._set_state(VOICE_ERROR)
         self.failed.emit(kind, message)
 

@@ -409,6 +409,83 @@ async def test_prefetch_preserves_order_with_slow_synthesis() -> None:
 
 
 @pytest.mark.asyncio
+async def test_microphone_gate_drops_pre_synthesized_clip(
+    tmp_path: Path, caplog
+) -> None:
+    """A clip synthesized before the gate opened must never play."""
+    gate = {"active": False}
+    engine = TimingEngine(delay=0.02, file_dir=tmp_path)
+    bridge = _HoldBridge()
+    queue = SpeechQueue(
+        make_factory(engine),
+        lambda: bridge,
+        tmp_dir=str(tmp_path),
+        is_microphone_active=lambda: gate["active"],
+    )
+    caplog.set_level(logging.INFO, logger="friday.voice.speaker")
+    queue.enqueue("zebra-first", "v", 0, "fake")
+    queue.enqueue("zebra-second", "v", 0, "fake")
+
+    assert await _wait_until(lambda: len(bridge.started) == 1)
+    assert await _wait_until(lambda: len(engine.calls) >= 2)
+
+    gate["active"] = True
+    bridge.release()
+    await queue.wait_idle()
+
+    assert len(bridge.played) == 1
+    assert _played_texts(engine, bridge) == ["zebra-first"]
+    assert "dropped: microphone active" in caplog.text
+    assert "zebra-second" not in caplog.text
+    assert list(tmp_path.glob("friday_tts_*.mp3")) == []
+
+
+@pytest.mark.asyncio
+async def test_microphone_gate_blocks_every_play_without_starting_speech(
+    tmp_path: Path,
+) -> None:
+    """With the gate open nothing plays and speech never reports started."""
+    started: list[int] = []
+    gate = {"active": True}
+    engine = TimingEngine(delay=0.0, file_dir=tmp_path)
+    bridge = _FakeBridge()
+    queue = SpeechQueue(
+        make_factory(engine),
+        lambda: bridge,
+        tmp_dir=str(tmp_path),
+        on_started=lambda: started.append(1),
+        is_microphone_active=lambda: gate["active"],
+    )
+
+    queue.enqueue("one", "v", 0, "fake")
+    queue.enqueue("two", "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert bridge.played == []
+    assert started == []
+    assert list(tmp_path.glob("friday_tts_*.mp3")) == []
+
+
+@pytest.mark.asyncio
+async def test_microphone_gate_off_plays_normally(tmp_path: Path) -> None:
+    """Closing the gate restores ordinary playback."""
+    gate = {"active": False}
+    engine = TimingEngine(delay=0.0, file_dir=tmp_path)
+    bridge = _FakeBridge()
+    queue = SpeechQueue(
+        make_factory(engine),
+        lambda: bridge,
+        tmp_dir=str(tmp_path),
+        is_microphone_active=lambda: gate["active"],
+    )
+
+    queue.enqueue("audible", "v", 0, "fake")
+    await queue.wait_idle()
+
+    assert len(bridge.played) == 1
+
+
+@pytest.mark.asyncio
 async def test_stop_drops_stale_tasks_and_emits_one_terminal_signal() -> None:
     """Stopping before playback drops stale work and reports one finish."""
     finished: list[None] = []
